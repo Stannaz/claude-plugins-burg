@@ -18,7 +18,6 @@ Inbound messages now carry their reply target. When a Discord user replies to an
 
 A new tool, `fetch_message(chat_id, message_id)`, returns one specific message in full (no truncation) — used when the preview is insufficient or when grabbing a message by id from `fetch_messages` output. Attachments on a replied-to message are retrieved via the existing `download_attachment(chat_id, message_id)`.
 
-When the inbound message is a reply, the rendered TUI line is also prefixed with `↳ replying to <user>: <preview>\n` so the operator sees the reply target in their terminal alongside the message body. The structured `reply_to_*` meta fields stay populated regardless.
 
 ## Working in this fork — rules for Claude
 
