@@ -953,10 +953,12 @@ async function buildReplyMeta(msg: Message): Promise<Record<string, string>> {
   }
   const me = client.user?.id
   const who = ref.author.id === me ? 'me' : ref.author.username
+  const preview = buildReplyPreview(ref.content, [...ref.attachments.values()])
+  process.stderr.write(`discord channel: reply to ${ref.id} by ${who} — ${preview}\n`)
   return {
     reply_to_id: ref.id,
     reply_to_user: who,
-    reply_to_preview: buildReplyPreview(ref.content, [...ref.attachments.values()]),
+    reply_to_preview: preview,
   }
 }
 

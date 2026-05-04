@@ -18,6 +18,8 @@ Inbound messages now carry their reply target. When a Discord user replies to an
 
 A new tool, `fetch_message(chat_id, message_id)`, returns one specific message in full (no truncation) — used when the preview is insufficient or when grabbing a message by id from `fetch_messages` output. Attachments on a replied-to message are retrieved via the existing `download_attachment(chat_id, message_id)`.
 
+Each reply also emits a stderr log line of the form `discord channel: reply to <id> by <user> — <preview>` so the operator can see reply context land in the terminal.
+
 ## Working in this fork — rules for Claude
 
 The whole point of the fork is that it stays cleanly rebaseable onto upstream. Rules for any change you make here:
