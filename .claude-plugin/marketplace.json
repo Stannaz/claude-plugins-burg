@@ -1,10 +1,9 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
-  "name": "claude-plugins-official",
-  "description": "Directory of popular Claude Code extensions including development tools, productivity plugins, and MCP integrations",
+  "name": "claude-plugins-burg",
+  "description": "Burg fork of claude-plugins-official with extensions to the Discord plugin",
   "owner": {
-    "name": "Anthropic",
-    "email": "support@anthropic.com"
+    "name": "Stannaz"
   },
   "plugins": [
     {
