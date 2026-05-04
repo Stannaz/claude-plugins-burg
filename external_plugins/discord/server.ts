@@ -900,12 +900,9 @@ async function handleInbound(msg: Message): Promise<void> {
 
   // Attachment listing goes in meta only — an in-content annotation is
   // forgeable by any allowlisted sender typing that string.
-  const baseContent = msg.content || (atts.length > 0 ? '(attachment)' : '')
+  const content = msg.content || (atts.length > 0 ? '(attachment)' : '')
 
   const replyMeta = await buildReplyMeta(msg)
-  const content = replyMeta.reply_to_preview
-    ? `↳ replying to ${replyMeta.reply_to_user}: ${replyMeta.reply_to_preview}\n${baseContent}`
-    : baseContent
 
   mcp.notification({
     method: 'notifications/claude/channel',
