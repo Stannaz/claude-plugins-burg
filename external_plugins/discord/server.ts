@@ -900,9 +900,12 @@ async function handleInbound(msg: Message): Promise<void> {
 
   // Attachment listing goes in meta only — an in-content annotation is
   // forgeable by any allowlisted sender typing that string.
-  const content = msg.content || (atts.length > 0 ? '(attachment)' : '')
+  const baseContent = msg.content || (atts.length > 0 ? '(attachment)' : '')
 
   const replyMeta = await buildReplyMeta(msg)
+  const content = replyMeta.reply_to_preview
+    ? `↳ replying to ${replyMeta.reply_to_user}: ${replyMeta.reply_to_preview}\n${baseContent}`
+    : baseContent
 
   mcp.notification({
     method: 'notifications/claude/channel',
@@ -953,12 +956,10 @@ async function buildReplyMeta(msg: Message): Promise<Record<string, string>> {
   }
   const me = client.user?.id
   const who = ref.author.id === me ? 'me' : ref.author.username
-  const preview = buildReplyPreview(ref.content, [...ref.attachments.values()])
-  process.stderr.write(`discord channel: reply to ${ref.id} by ${who} — ${preview}\n`)
   return {
     reply_to_id: ref.id,
     reply_to_user: who,
-    reply_to_preview: preview,
+    reply_to_preview: buildReplyPreview(ref.content, [...ref.attachments.values()]),
   }
 }
 
