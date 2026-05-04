@@ -1,6 +1,6 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
-  "name": "claude-plugins-burg",
+  "name": "burg-plugins",
   "description": "Burg fork of claude-plugins-official with extensions to the Discord plugin",
   "owner": {
     "name": "Stannaz"
