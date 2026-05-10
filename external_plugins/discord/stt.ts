@@ -179,8 +179,13 @@ export type STTSessionOpts = {
   onTranscript: (r: TranscriptResult) => void
   /** Fired on ws errors (network, auth, deepgram-side). */
   onError?: (err: Error) => void
-  /** Fired once when the session has fully torn down. */
-  onClose?: () => void
+  /** Fired once when the session has fully torn down. Includes the ws close
+   *  code/reason if known (otherwise undefined — e.g. local destroy). */
+  onClose?: (info?: { code?: number; reason?: string; preOpen?: boolean }) => void
+  /** Fired once when the deepgram websocket has opened. */
+  onOpen?: () => void
+  /** Fired once when the first PCM frame is sent to deepgram. */
+  onFirstFrame?: () => void
   /** Optional per-frame PCM gate. When this returns true, the frame is
    *  dropped instead of sent to Deepgram — used to suppress echo while the
    *  bot itself is speaking. */
@@ -218,6 +223,9 @@ export class STTSession {
    *  closures count toward the unavailability tracker; post-open ones
    *  usually mean the user just stopped speaking). */
   private wsOpened = false
+  /** Close info captured from ws 'close' event so cleanup can hand it to
+   *  the onClose callback for logging. */
+  private closeInfo: { code?: number; reason?: string; preOpen?: boolean } | undefined
   private opts: STTSessionOpts
 
   constructor(opts: STTSessionOpts) {
@@ -244,6 +252,7 @@ export class STTSession {
 
     this.ws.on('open', () => {
       this.wsOpened = true
+      this.opts.onOpen?.()
       if (this.closed) {
         try { this.ws?.close() } catch {}
         return
@@ -255,7 +264,10 @@ export class STTSession {
       this.decoder.on('data', (pcm: Buffer) => {
         if (this.closed) return
         if (this.opts.shouldDropPCM?.()) return
-        if (!this.firstFrameAtMs) this.firstFrameAtMs = Date.now()
+        if (!this.firstFrameAtMs) {
+          this.firstFrameAtMs = Date.now()
+          this.opts.onFirstFrame?.()
+        }
         if (this.ws?.readyState === WebSocket.OPEN) {
           try { this.ws.send(pcm) } catch (err) {
             this.opts.onError?.(err instanceof Error ? err : new Error(String(err)))
@@ -292,12 +304,13 @@ export class STTSession {
     })
 
     this.ws.on('close', (code, reasonBuf) => {
+      const reason = reasonBuf?.toString() || ''
+      this.closeInfo = { code, reason, preOpen: !this.wsOpened }
       // Codes 1000/1006 are normal close / abnormal-but-non-deepgram-fault.
       // Pre-open closes always count; post-open closes only if the server
       // sent a non-1000 code (e.g. 4xxx auth/billing).
       if (!this.wsOpened || (code !== 1000 && code !== 1006)) {
-        const reason = reasonBuf?.toString() || `code ${code}`
-        recordFailure(`ws close pre-open=${!this.wsOpened}: ${reason}`)
+        recordFailure(`ws close pre-open=${!this.wsOpened}: ${reason || `code ${code}`}`)
       }
       this.cleanup()
     })
@@ -360,7 +373,7 @@ export class STTSession {
     try { this.decoder.destroy() } catch {}
     try { this.ws?.terminate() } catch {}
     this.ws = null
-    this.opts.onClose?.()
+    this.opts.onClose?.(this.closeInfo)
   }
 
   /** Force-close immediately (e.g. plugin shutdown, leave voice). */
