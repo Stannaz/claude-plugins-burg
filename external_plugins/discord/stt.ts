@@ -27,6 +27,49 @@ import type { AudioReceiveStream } from '@discordjs/voice'
 const DEEPGRAM_KEY_PATH = '/root/.deepgram_key'
 const DEEPGRAM_LIVE_URL = 'wss://api.deepgram.com/v1/listen'
 
+/** Deepgram Nova-3 streaming pricing (2026-05-10): $0.0043 per minute. */
+const DEEPGRAM_USD_PER_MIN = 0.0043
+
+/** Daily soft cap on Deepgram spend, in USD. Override via env DEEPGRAM_DAILY_CAP_USD. */
+const DAILY_CAP_USD = Number.isFinite(Number(process.env.DEEPGRAM_DAILY_CAP_USD))
+  ? Number(process.env.DEEPGRAM_DAILY_CAP_USD)
+  : 5.0
+
+type DailySpend = { utcDay: string; spendUsd: number }
+let dailySpend: DailySpend = { utcDay: utcDayKey(), spendUsd: 0 }
+
+function utcDayKey(): string {
+  return new Date().toISOString().slice(0, 10) // YYYY-MM-DD
+}
+
+function rolloverIfNewDay(): void {
+  const today = utcDayKey()
+  if (dailySpend.utcDay !== today) {
+    dailySpend = { utcDay: today, spendUsd: 0 }
+  }
+}
+
+/** Account for a closed session's wall-clock duration (approximation of audio sent). */
+function recordSessionDuration(seconds: number): void {
+  rolloverIfNewDay()
+  dailySpend.spendUsd += (seconds / 60) * DEEPGRAM_USD_PER_MIN
+}
+
+export function dailySpendUsd(): number {
+  rolloverIfNewDay()
+  return dailySpend.spendUsd
+}
+
+export function dailyCapUsd(): number {
+  return DAILY_CAP_USD
+}
+
+/** True when today's projected spend has already met or exceeded the daily cap.
+ *  Caller must check this BEFORE opening a new STTSession. */
+export function budgetExceeded(): boolean {
+  return dailySpendUsd() >= DAILY_CAP_USD
+}
+
 let cachedKey: string | null = null
 function getDeepgramKey(): string {
   if (cachedKey !== null) return cachedKey
@@ -61,6 +104,10 @@ export type STTSessionOpts = {
   onError?: (err: Error) => void
   /** Fired once when the session has fully torn down. */
   onClose?: () => void
+  /** Optional per-frame PCM gate. When this returns true, the frame is
+   *  dropped instead of sent to Deepgram — used to suppress echo while the
+   *  bot itself is speaking. */
+  shouldDropPCM?: () => boolean
 }
 
 /**
@@ -125,6 +172,7 @@ export class STTSession {
       this.opts.opusStream.pipe(this.decoder)
       this.decoder.on('data', (pcm: Buffer) => {
         if (this.closed) return
+        if (this.opts.shouldDropPCM?.()) return
         if (!this.firstFrameAtMs) this.firstFrameAtMs = Date.now()
         if (this.ws?.readyState === WebSocket.OPEN) {
           try { this.ws.send(pcm) } catch (err) {
@@ -212,6 +260,10 @@ export class STTSession {
   private cleanup(): void {
     if (this.closed) return
     this.closed = true
+    if (this.firstFrameAtMs) {
+      const seconds = Math.max(0, (Date.now() - this.firstFrameAtMs) / 1000)
+      recordSessionDuration(seconds)
+    }
     try { this.opts.opusStream.unpipe(this.decoder) } catch {}
     try { this.decoder.destroy() } catch {}
     try { this.ws?.terminate() } catch {}

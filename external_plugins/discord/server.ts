@@ -38,7 +38,9 @@ import {
   status as voiceStatus,
   setVoiceCallbacks,
   shutdownVoice,
+  isLikelyBotEcho,
 } from './voice'
+import { dailyCapUsd } from './stt'
 import { randomBytes } from 'crypto'
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync, statSync, renameSync, realpathSync, chmodSync } from 'fs'
 import { homedir } from 'os'
@@ -899,6 +901,12 @@ setVoiceCallbacks({
   // inbound so the main session sees it as a directed message; otherwise
   // drop silently (zero model cost, TSV-logging comes in a later commit).
   onTranscript: async r => {
+    // Echo guard: if the transcript closely matches something the bot said in
+    // the last 5s, drop it. Catches the speakers-into-mic feedback loop.
+    if (isLikelyBotEcho(r.text, r.guildId)) {
+      process.stderr.write(`discord channel: dropped echo: ${r.text.slice(0, 80)}\n`)
+      return
+    }
     if (!WAKE_WORD_RE.test(r.text)) return
     const username = await resolveUsername(r.userId)
     mcp.notification({
@@ -925,6 +933,27 @@ setVoiceCallbacks({
   // breaker land in a later commit (phase-2 graceful degradation).
   onSTTError: ({ guildId, channelId, userId, reason }) => {
     process.stderr.write(`discord channel: stt error guild=${guildId} channel=${channelId} user=${userId}: ${reason}\n`)
+  },
+
+  // Daily Deepgram budget tripped — emit one inbound so the main session
+  // knows STT is silently off until 00:00 UTC. Repeats are suppressed in
+  // voice.ts (per-guild flag).
+  onBudgetExceeded: ({ guildId, channelId }) => {
+    mcp.notification({
+      method: 'notifications/claude/channel',
+      params: {
+        content: `(deepgram daily budget cap of $${dailyCapUsd().toFixed(2)} reached — voice transcription off until 00:00 UTC)`,
+        meta: {
+          source: 'voice',
+          budget_exceeded: 'true',
+          channel_id: channelId,
+          guild_id: guildId,
+          ts: new Date().toISOString(),
+        },
+      },
+    }).catch(err => {
+      process.stderr.write(`discord channel: failed to deliver budget event: ${err}\n`)
+    })
   },
 })
 
