@@ -497,37 +497,53 @@ function wireSTT(client: Client, state: GuildVoiceState): void {
     }
     logVoice(`stt: subscribed userId=${userId}`)
 
-    const session = new STTSession({
-      userId,
-      guildId: state.guildId,
-      channelId: state.channelId,
-      opusStream,
-      shouldDropPCM: () => Date.now() < state.pcmMutedUntil,
-      onTranscript: r => {
-        logVoice(`stt: transcript userId=${userId} text=${JSON.stringify(r.text)} latency=${r.latencyMs}ms`)
-        callbacks.onTranscript?.(r)
-      },
-      onOpen: () => logVoice(`stt: ws open userId=${userId}`),
-      onFirstFrame: () => logVoice(`stt: first PCM frame sent userId=${userId}`),
-      onError: err => {
-        callbacks.onSTTError?.({
-          guildId: state.guildId,
-          channelId: state.channelId,
-          userId,
-          reason: err.message,
-        })
-        logVoice(`stt error guild=${state.guildId} user=${userId}: ${err.message}`)
-      },
-      onClose: info => {
-        const codeStr = info?.code !== undefined ? `code=${info.code}` : 'code=?'
-        const reasonStr = info?.reason ? ` reason=${JSON.stringify(info.reason)}` : ''
-        const preOpenStr = info?.preOpen ? ' preOpen=true' : ''
-        logVoice(`stt: session closed userId=${userId} ${codeStr}${reasonStr}${preOpenStr}`)
-        state.sttSessions.delete(userId)
-      },
-    })
+    let session: STTSession
+    try {
+      session = new STTSession({
+        userId,
+        guildId: state.guildId,
+        channelId: state.channelId,
+        opusStream,
+        shouldDropPCM: () => Date.now() < state.pcmMutedUntil,
+        onTranscript: r => {
+          logVoice(`stt: transcript userId=${userId} text=${JSON.stringify(r.text)} latency=${r.latencyMs}ms`)
+          callbacks.onTranscript?.(r)
+        },
+        onOpen: () => logVoice(`stt: ws open userId=${userId}`),
+        onFirstFrame: () => logVoice(`stt: first PCM frame sent userId=${userId}`),
+        onError: err => {
+          callbacks.onSTTError?.({
+            guildId: state.guildId,
+            channelId: state.channelId,
+            userId,
+            reason: err.message,
+          })
+          logVoice(`stt error guild=${state.guildId} user=${userId}: ${err.message}`)
+        },
+        onClose: info => {
+          const codeStr = info?.code !== undefined ? `code=${info.code}` : 'code=?'
+          const reasonStr = info?.reason ? ` reason=${JSON.stringify(info.reason)}` : ''
+          const preOpenStr = info?.preOpen ? ' preOpen=true' : ''
+          logVoice(`stt: session closed userId=${userId} ${codeStr}${reasonStr}${preOpenStr}`)
+          state.sttSessions.delete(userId)
+        },
+      })
+    } catch (err) {
+      const msg = err instanceof Error ? `${err.message}\n${err.stack}` : String(err)
+      logVoice(`stt: STTSession ctor threw for ${userId}: ${msg}`)
+      try { opusStream.destroy() } catch {}
+      return
+    }
     state.sttSessions.set(userId, session)
-    session.start()
+    try {
+      session.start()
+    } catch (err) {
+      const msg = err instanceof Error ? `${err.message}\n${err.stack}` : String(err)
+      logVoice(`stt: session.start() threw for ${userId}: ${msg}`)
+      state.sttSessions.delete(userId)
+      try { session.destroy() } catch {}
+      return
+    }
 
     // Defensive: if the opus stream ends (silence, user leaves), tell the
     // session to flush — the ws close handler will then drop it from the map.
