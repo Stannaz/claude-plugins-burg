@@ -34,7 +34,7 @@ import { spawn, type ChildProcess } from 'child_process'
 import { mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, appendFileSync } from 'fs'
 import { join } from 'path'
 import type { Readable } from 'stream'
-import { STTSession, type TranscriptResult, deepgramKeyAvailable } from './stt'
+import { STTSession, type TranscriptResult, deepgramKeyAvailable, budgetExceeded } from './stt'
 
 const LOCK_DIR = '/root/burg/voice/locks'
 const LOG_FILE = '/root/burg/voice/logs/voice.log'
@@ -56,6 +56,17 @@ type GuildVoiceState = {
   childProcs: Set<ChildProcess>
   /** Active STT sessions keyed by userId — one per user currently speaking. */
   sttSessions: Map<string, STTSession>
+  /** Recent bot utterances kept around for echo dedupe in server.ts.
+   *  Pruned to a 5s window on every push. */
+  recentUtterances: Array<{ text: string; ts: number }>
+  /** Wall-clock ms until which we drop incoming PCM frames (echo guard).
+   *  Set whenever the bot is mid-TTS or just finished one. */
+  pcmMutedUntil: number
+  /** Whether the player is currently rendering a TTS chunk. */
+  ttsActive: boolean
+  /** True once a budget_exceeded inbound was emitted today, so we don't
+   *  spam the main session with repeats. */
+  budgetEventSent: boolean
 }
 
 const states = new Map<string, GuildVoiceState>()
@@ -77,6 +88,8 @@ export type VoiceCallbacks = {
   onTranscript?: (r: TranscriptResult) => void
   /** Called when a deepgram session errors out (auth, network, etc). */
   onSTTError?: (info: { guildId: string; channelId: string; userId: string; reason: string }) => void
+  /** Called once-per-day-per-guild when the budget cap stops new sessions. */
+  onBudgetExceeded?: (info: { guildId: string; channelId: string }) => void
 }
 
 let callbacks: VoiceCallbacks = {}
@@ -190,16 +203,41 @@ export async function joinVoice(client: Client, channelId: string): Promise<stri
     current: null,
     childProcs: new Set(),
     sttSessions: new Map(),
+    recentUtterances: [],
+    pcmMutedUntil: 0,
+    ttsActive: false,
+    budgetEventSent: false,
   }
   states.set(guildId, state)
   wireSTT(client, state)
 
+  /** PCM-mute window after each TTS chunk to suppress immediate echo back
+   *  through Deepgram. Belt-and-braces alongside the text-level dedupe in
+   *  server.ts. */
+  const ECHO_MUTE_TAIL_MS = 300
+
+  player.on(AudioPlayerStatus.Playing, () => {
+    if (state.current?.kind === 'tts') {
+      state.ttsActive = true
+      // While TTS is playing, push the muted-until forward so PCM stays
+      // suppressed; we drop it back to now+ECHO_MUTE_TAIL_MS once it ends.
+      state.pcmMutedUntil = Date.now() + 60_000
+    }
+  })
   player.on(AudioPlayerStatus.Idle, () => {
+    if (state.ttsActive) {
+      state.ttsActive = false
+      state.pcmMutedUntil = Date.now() + ECHO_MUTE_TAIL_MS
+    }
     state.current = null
     void runQueue(state)
   })
   player.on('error', err => {
     logVoice(`player error in guild ${guildId}: ${err.message}`)
+    if (state.ttsActive) {
+      state.ttsActive = false
+      state.pcmMutedUntil = Date.now() + ECHO_MUTE_TAIL_MS
+    }
     state.current = null
     void runQueue(state)
   })
@@ -297,6 +335,19 @@ function wireSTT(client: Client, state: GuildVoiceState): void {
       logVoice(`stt: concurrency cap (${MAX_CONCURRENT_STT}) hit, skipping userId=${userId}`)
       return
     }
+    if (budgetExceeded()) {
+      // First trip of the day → emit a one-shot inbound so the model knows
+      // STT is silently off. After that, just log.
+      if (!state.budgetEventSent) {
+        state.budgetEventSent = true
+        callbacks.onBudgetExceeded?.({
+          guildId: state.guildId,
+          channelId: state.channelId,
+        })
+      }
+      logVoice(`stt: budget exceeded, refusing new session for userId=${userId}`)
+      return
+    }
 
     let opusStream
     try {
@@ -313,6 +364,7 @@ function wireSTT(client: Client, state: GuildVoiceState): void {
       guildId: state.guildId,
       channelId: state.channelId,
       opusStream,
+      shouldDropPCM: () => Date.now() < state.pcmMutedUntil,
       onTranscript: r => callbacks.onTranscript?.(r),
       onError: err => {
         callbacks.onSTTError?.({
@@ -365,7 +417,56 @@ export function enqueueTTS(text: string, voice = TTS_VOICE_DEFAULT, guildId?: st
     try { s.player.stop(true) } catch {}
   }
   s.queue.push({ kind: 'tts', text, voice })
+  recordBotUtterance(s, text)
   void runQueue(s)
+}
+
+/** Echo-dedupe ring buffer: 5 second window of recent bot utterances. */
+const ECHO_WINDOW_MS = 5000
+const ECHO_MIN_SIMILARITY = 0.7
+
+function recordBotUtterance(s: GuildVoiceState, text: string): void {
+  const now = Date.now()
+  s.recentUtterances.push({ text, ts: now })
+  s.recentUtterances = s.recentUtterances.filter(u => now - u.ts <= ECHO_WINDOW_MS)
+}
+
+function normaliseForEcho(text: string): string[] {
+  return text
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter(Boolean)
+}
+
+/** Jaccard similarity over normalised token sets. Cheap and deterministic;
+ *  good enough for "did the bot just say this?" given how short utterances are. */
+function jaccard(a: string[], b: string[]): number {
+  if (a.length === 0 || b.length === 0) return 0
+  const A = new Set(a)
+  const B = new Set(b)
+  let inter = 0
+  for (const t of A) if (B.has(t)) inter++
+  return inter / (A.size + B.size - inter)
+}
+
+/**
+ * Returns true if `transcript` looks like an echo of something the bot said in
+ * the last 5 seconds. Used by server.ts to drop self-heard transcripts before
+ * the wake-word filter runs.
+ */
+export function isLikelyBotEcho(transcript: string, guildId: string): boolean {
+  const s = states.get(guildId)
+  if (!s || s.recentUtterances.length === 0) return false
+  const now = Date.now()
+  const heard = normaliseForEcho(transcript)
+  if (heard.length === 0) return false
+  for (const u of s.recentUtterances) {
+    if (now - u.ts > ECHO_WINDOW_MS) continue
+    const said = normaliseForEcho(u.text)
+    if (jaccard(heard, said) >= ECHO_MIN_SIMILARITY) return true
+  }
+  return false
 }
 
 export function stopPlayback(guildId?: string): void {
