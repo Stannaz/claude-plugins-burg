@@ -39,6 +39,7 @@ import {
   setVoiceCallbacks,
   shutdownVoice,
   isLikelyBotEcho,
+  logUtterance,
 } from './voice'
 import { dailyCapUsd } from './stt'
 import { randomBytes } from 'crypto'
@@ -899,16 +900,31 @@ setVoiceCallbacks({
 
   // Finalised transcripts from Deepgram. Wake-word match → emit <voice>
   // inbound so the main session sees it as a directed message; otherwise
-  // drop silently (zero model cost, TSV-logging comes in a later commit).
+  // drop silently (zero model cost). Every transcript is TSV-logged with
+  // the gate decision so "why didn't u respond" debugging is one Read away.
   onTranscript: async r => {
-    // Echo guard: if the transcript closely matches something the bot said in
-    // the last 5s, drop it. Catches the speakers-into-mic feedback loop.
+    const username = await resolveUsername(r.userId)
     if (isLikelyBotEcho(r.text, r.guildId)) {
-      process.stderr.write(`discord channel: dropped echo: ${r.text.slice(0, 80)}\n`)
+      logUtterance({
+        speakerId: r.userId, speakerName: username, direction: 'in',
+        text: r.text, confidence: r.confidence, latencyMs: r.latencyMs,
+        gateDecision: 'skipped_echo_match',
+      })
       return
     }
-    if (!WAKE_WORD_RE.test(r.text)) return
-    const username = await resolveUsername(r.userId)
+    if (!WAKE_WORD_RE.test(r.text)) {
+      logUtterance({
+        speakerId: r.userId, speakerName: username, direction: 'in',
+        text: r.text, confidence: r.confidence, latencyMs: r.latencyMs,
+        gateDecision: 'skipped_no_wake',
+      })
+      return
+    }
+    logUtterance({
+      speakerId: r.userId, speakerName: username, direction: 'in',
+      text: r.text, confidence: r.confidence, latencyMs: r.latencyMs,
+      gateDecision: 'forwarded',
+    })
     mcp.notification({
       method: 'notifications/claude/channel',
       params: {

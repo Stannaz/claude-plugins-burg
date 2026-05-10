@@ -37,7 +37,20 @@ import type { Readable } from 'stream'
 import { STTSession, type TranscriptResult, deepgramKeyAvailable, budgetExceeded } from './stt'
 
 const LOCK_DIR = '/root/burg/voice/locks'
-const LOG_FILE = '/root/burg/voice/logs/voice.log'
+const LOG_DIR = '/root/burg/voice/logs'
+const LOG_FILE = `${LOG_DIR}/voice.log`
+const TSV_HEADER = [
+  'ts',
+  'speaker_id',
+  'speaker_name',
+  'direction',
+  'text',
+  'deepgram_confidence',
+  'deepgram_latency_ms',
+  'gate_decision',
+  'tts_first_audio_ms',
+  'error',
+].join('\t') + '\n'
 const TTS_VOICE_DEFAULT = 'en-GB-RyanNeural'
 
 type QueueItem =
@@ -100,9 +113,61 @@ export function setVoiceCallbacks(cb: VoiceCallbacks): void {
 
 function logVoice(line: string): void {
   try {
-    mkdirSync('/root/burg/voice/logs', { recursive: true })
+    mkdirSync(LOG_DIR, { recursive: true })
     appendFileSync(LOG_FILE, `[${new Date().toISOString()}] ${line}\n`)
   } catch {}
+}
+
+export type GateDecision =
+  | 'forwarded'
+  | 'skipped_no_wake'
+  | 'skipped_cooldown'
+  | 'skipped_echo_match'
+  | 'skipped_budget'
+  | 'played_file'
+  | 'tts_failed'
+
+export type UtteranceLogRow = {
+  speakerId: string
+  speakerName: string
+  direction: 'in' | 'out'
+  text: string
+  confidence?: number
+  latencyMs?: number
+  gateDecision: GateDecision
+  ttsFirstAudioMs?: number
+  error?: string
+}
+
+function tsvEscape(v: unknown): string {
+  if (v == null) return ''
+  return String(v).replace(/[\t\r\n]/g, ' ')
+}
+
+/** Append one row to /root/burg/voice/logs/voice-YYYY-MM-DD.tsv (auto-rotates
+ *  daily by date in the filename — no external logrotate needed). */
+export function logUtterance(row: UtteranceLogRow): void {
+  try {
+    mkdirSync(LOG_DIR, { recursive: true })
+    const day = new Date().toISOString().slice(0, 10)
+    const path = `${LOG_DIR}/voice-${day}.tsv`
+    if (!existsSync(path)) writeFileSync(path, TSV_HEADER)
+    const line = [
+      new Date().toISOString(),
+      row.speakerId,
+      row.speakerName,
+      row.direction,
+      row.text,
+      row.confidence != null ? row.confidence.toFixed(3) : '',
+      row.latencyMs != null ? String(row.latencyMs) : '',
+      row.gateDecision,
+      row.ttsFirstAudioMs != null ? String(row.ttsFirstAudioMs) : '',
+      row.error ?? '',
+    ].map(tsvEscape).join('\t') + '\n'
+    appendFileSync(path, line)
+  } catch (err) {
+    logVoice(`tsv log failed: ${err instanceof Error ? err.message : err}`)
+  }
 }
 
 function lockPath(guildId: string): string {
@@ -418,6 +483,10 @@ export function enqueueTTS(text: string, voice = TTS_VOICE_DEFAULT, guildId?: st
   }
   s.queue.push({ kind: 'tts', text, voice })
   recordBotUtterance(s, text)
+  logUtterance({
+    speakerId: 'BOT', speakerName: 'BOT', direction: 'out',
+    text, gateDecision: 'forwarded',
+  })
   void runQueue(s)
 }
 
