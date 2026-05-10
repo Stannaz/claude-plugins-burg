@@ -45,7 +45,7 @@ If you said "burg" and the bot didn't react:
 1. Open today's `/root/burg/voice/logs/voice-YYYY-MM-DD.tsv`.
 2. Find your row by timestamp.
 3. Read the `text` column — that's what deepgram actually heard.
-4. If `gate_decision = skipped_no_wake`, deepgram misheard. Add the mishearing to `WAKE_WORD_RE` in `server.ts` (alongside `burg|berg|burke|bork|borg|doug|...`).
+4. If `gate_decision = skipped_no_wake`, deepgram misheard. Add the mishearing to `WAKE_WORD_RE` in `server.ts` (alongside `burg|berg|burke|bork|borg|doug|burger|...`).
 5. Restart Claude Code (`/exit` → relaunch) so server.ts reloads.
 
 ### Old python bot (decommissioned)
