@@ -19,6 +19,39 @@ Inbound messages now carry their reply target. When a Discord user replies to an
 A new tool, `fetch_message(chat_id, message_id)`, returns one specific message in full (no truncation) — used when the preview is insufficient or when grabbing a message by id from `fetch_messages` output. Attachments on a replied-to message are retrieved via the existing `download_attachment(chat_id, message_id)`.
 
 
+## Logs — where to look when something breaks
+
+Read this *before* grepping the filesystem.
+
+### Voice (transport + STT)
+
+- `/root/burg/voice/logs/voice.log` — newline-delimited event log: voice join/leave, `speaking.start`, deepgram ws lifecycle, finalised transcripts. Source: `voice.ts` `voiceLog()`.
+- `/root/burg/voice/logs/voice-YYYY-MM-DD.tsv` — one row per finalised transcript with `gate_decision` (`skipped_no_wake` / `skipped_echo_match` / `passed`). **This is the file to read when "u didn't reply when i said burg"** — the row tells you what deepgram actually heard and why it gated. TTS-out is appended to the same file with `direction=out`.
+
+Both paths are hardcoded in `external_plugins/discord/voice.ts` (`LOG_DIR = '/root/burg/voice/logs'`). To relocate, change there — those two are the only writers.
+
+### MCP server stderr (`server.ts`)
+
+Claude Code captures the MCP server's stderr at:
+
+- `/root/.cache/claude-cli-nodejs/-root-burg/mcp-logs-plugin-discord-discord/<launch-timestamp>.jsonl`
+
+One file per Claude Code launch. Each line is `{debug|error, timestamp, sessionId, cwd}`. Use this for: gateway connect failures, login errors, voice_join failures, unhandled rejections, anything `process.stderr.write(...)` in `server.ts`. Newest file = current session (sort by mtime).
+
+### Wake-word debugging
+
+If you said "burg" and the bot didn't react:
+
+1. Open today's `/root/burg/voice/logs/voice-YYYY-MM-DD.tsv`.
+2. Find your row by timestamp.
+3. Read the `text` column — that's what deepgram actually heard.
+4. If `gate_decision = skipped_no_wake`, deepgram misheard. Add the mishearing to `WAKE_WORD_RE` in `server.ts` (alongside `burg|berg|burke|bork|borg|doug|...`).
+5. Restart Claude Code (`/exit` → relaunch) so server.ts reloads.
+
+### Old python bot (decommissioned)
+
+`bot.log`, `voice_bot.log`, `voice_log.tsv` in `/root/burg/voice/logs/` are from the previous python `bot.py`. Inactive. Don't grep these for current state.
+
 ## Working in this fork — rules for Claude
 
 The whole point of the fork is that it stays cleanly rebaseable onto upstream. Rules for any change you make here:
