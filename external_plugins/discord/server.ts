@@ -29,6 +29,16 @@ import {
   type Attachment,
   type Interaction,
 } from 'discord.js'
+import {
+  joinVoice,
+  leaveVoice,
+  enqueueFile,
+  enqueueTTS,
+  stopPlayback,
+  status as voiceStatus,
+  setVoiceCallbacks,
+  shutdownVoice,
+} from './voice'
 import { randomBytes } from 'crypto'
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync, statSync, renameSync, realpathSync, chmodSync } from 'fs'
 import { homedir } from 'os'
@@ -84,6 +94,11 @@ const client = new Client({
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
+    // Voice (phase 1+): GuildVoiceStates is required for the voice gateway to
+    // wire up at all; GuildMembers lets us resolve SSRC → user when STT lands
+    // in phase 2. Adding both now so we don't have to reconnect later.
+    GatewayIntentBits.GuildVoiceStates,
+    GatewayIntentBits.GuildMembers,
   ],
   // DMs arrive as partial channels — messageCreate never fires without this.
   partials: [Partials.Channel],
@@ -610,6 +625,70 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
         required: ['chat_id', 'message_id'],
       },
     },
+    {
+      name: 'voice_join',
+      description:
+        'Join a Discord voice channel by id. Once joined, voice_say speaks TTS into it and voice_play plays a local audio file. Returns the resolved guild id.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          channel_id: { type: 'string' },
+        },
+        required: ['channel_id'],
+      },
+    },
+    {
+      name: 'voice_leave',
+      description: 'Leave the voice channel in the given guild (or the only connected guild if omitted).',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          guild_id: { type: 'string' },
+        },
+      },
+    },
+    {
+      name: 'voice_play',
+      description:
+        'Queue an audio file (local absolute path) for playback in the connected voice channel. Files queue FIFO behind any currently-playing file. A voice_say call interrupts file playback (voice_say always wins; no auto-resume).',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'Absolute path to a local audio file (mp3/ogg/wav/etc).' },
+          guild_id: { type: 'string' },
+        },
+        required: ['path'],
+      },
+    },
+    {
+      name: 'voice_say',
+      description:
+        'Speak text in the connected voice channel via edge-tts. Default voice is en-GB-RyanNeural. This is the tool to use when replying to <voice> inbound events — voice_say speaks; the reply tool sends Discord text. voice_say preempts any voice_play in flight.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          text: { type: 'string' },
+          voice: { type: 'string', description: 'edge-tts voice id; defaults to en-GB-RyanNeural.' },
+          guild_id: { type: 'string' },
+        },
+        required: ['text'],
+      },
+    },
+    {
+      name: 'voice_stop',
+      description: 'Stop the currently playing audio and clear the queue in the given guild.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          guild_id: { type: 'string' },
+        },
+      },
+    },
+    {
+      name: 'voice_status',
+      description: 'Report which voice channels the bot is connected to and what is queued.',
+      inputSchema: { type: 'object', properties: {} },
+    },
   ],
 }))
 
@@ -735,6 +814,30 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
           content: [{ type: 'text', text: `downloaded ${lines.length} attachment(s):\n${lines.join('\n')}` }],
         }
       }
+      case 'voice_join': {
+        const guildId = await joinVoice(client, args.channel_id as string)
+        return { content: [{ type: 'text', text: `joined voice in guild ${guildId}` }] }
+      }
+      case 'voice_leave': {
+        const result = leaveVoice(args.guild_id as string | undefined)
+        return { content: [{ type: 'text', text: result }] }
+      }
+      case 'voice_play': {
+        enqueueFile(args.path as string, args.guild_id as string | undefined)
+        return { content: [{ type: 'text', text: `queued ${args.path}` }] }
+      }
+      case 'voice_say': {
+        const voice = (args.voice as string | undefined) ?? 'en-GB-RyanNeural'
+        enqueueTTS(args.text as string, voice, args.guild_id as string | undefined)
+        return { content: [{ type: 'text', text: `speaking (${voice})` }] }
+      }
+      case 'voice_stop': {
+        stopPlayback(args.guild_id as string | undefined)
+        return { content: [{ type: 'text', text: 'stopped' }] }
+      }
+      case 'voice_status': {
+        return { content: [{ type: 'text', text: voiceStatus() }] }
+      }
       default:
         return {
           content: [{ type: 'text', text: `unknown tool: ${req.params.name}` }],
@@ -750,6 +853,30 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
   }
 })
 
+// edge-tts errors surface as a one-shot <voice tts_failed=true> inbound so the
+// main session knows the spoken reply didn't go out.
+setVoiceCallbacks({
+  onTTSFailure: ({ guildId, channelId, reason, text }) => {
+    mcp.notification({
+      method: 'notifications/claude/channel',
+      params: {
+        content: `(tts failed: ${reason})`,
+        meta: {
+          source: 'voice',
+          tts_failed: 'true',
+          reason,
+          guild_id: guildId,
+          channel_id: channelId,
+          text_preview: text.slice(0, 200),
+          ts: new Date().toISOString(),
+        },
+      },
+    }).catch(err => {
+      process.stderr.write(`discord channel: failed to deliver tts_failed event: ${err}\n`)
+    })
+  },
+})
+
 await mcp.connect(new StdioServerTransport())
 
 // When Claude Code closes the MCP connection, stdin gets EOF. Without this
@@ -759,6 +886,9 @@ function shutdown(): void {
   if (shuttingDown) return
   shuttingDown = true
   process.stderr.write('discord channel: shutting down\n')
+  try { shutdownVoice() } catch (err) {
+    process.stderr.write(`discord channel: voice shutdown failed: ${err}\n`)
+  }
   setTimeout(() => process.exit(0), 2000)
   void Promise.resolve(client.destroy()).finally(() => process.exit(0))
 }

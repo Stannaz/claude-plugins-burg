@@ -29,7 +29,7 @@ import {
 } from '@discordjs/voice'
 import type { Client, VoiceBasedChannel } from 'discord.js'
 import { ChannelType } from 'discord.js'
-import { spawn, type ChildProcessWithoutNullStreams } from 'child_process'
+import { spawn, type ChildProcess } from 'child_process'
 import { mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, appendFileSync } from 'fs'
 import { join } from 'path'
 import type { Readable } from 'stream'
@@ -51,7 +51,7 @@ type GuildVoiceState = {
   queue: QueueItem[]
   current: QueueItem | null
   /** Children we spawn (edge-tts, ffmpeg) so we can kill them on stop/leave. */
-  childProcs: Set<ChildProcessWithoutNullStreams>
+  childProcs: Set<ChildProcess>
 }
 
 const states = new Map<string, GuildVoiceState>()
@@ -329,10 +329,13 @@ async function playStreamNow(s: GuildVoiceState, stream: Readable, inputType: St
 async function playTTSNow(s: GuildVoiceState, text: string, voice: string): Promise<void> {
   const proc = spawn('edge-tts', ['--voice', voice, '--text', text], {
     stdio: ['ignore', 'pipe', 'pipe'],
-  }) as ChildProcessWithoutNullStreams
+  })
+  if (!proc.stdout || !proc.stderr) {
+    throw new Error('edge-tts: stdio pipes did not initialise')
+  }
   s.childProcs.add(proc)
   let stderr = ''
-  proc.stderr.on('data', d => { stderr += d.toString() })
+  proc.stderr.on('data', (d: Buffer) => { stderr += d.toString() })
 
   const failureFired = { v: false }
   const fail = (reason: string) => {
