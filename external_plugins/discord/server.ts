@@ -853,9 +853,28 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
   }
 })
 
-// edge-tts errors surface as a one-shot <voice tts_failed=true> inbound so the
-// main session knows the spoken reply didn't go out.
+// Wake-word filter: case-insensitive `\bburg\b` on each finalised transcript.
+// Plan §phase-3 puts the cooldown gate here too; that lands in a later commit
+// alongside the bot-echo dedupe.
+const WAKE_WORD_RE = /\bburg\b/i
+
+// Username cache so we don't hammer the Discord API every utterance.
+const usernameCache = new Map<string, string>()
+async function resolveUsername(userId: string): Promise<string> {
+  const cached = usernameCache.get(userId)
+  if (cached) return cached
+  try {
+    const u = await client.users.fetch(userId)
+    usernameCache.set(userId, u.username)
+    return u.username
+  } catch {
+    return userId
+  }
+}
+
 setVoiceCallbacks({
+  // edge-tts errors surface as a one-shot <voice tts_failed=true> inbound so
+  // the main session knows the spoken reply didn't go out.
   onTTSFailure: ({ guildId, channelId, reason, text }) => {
     mcp.notification({
       method: 'notifications/claude/channel',
@@ -874,6 +893,38 @@ setVoiceCallbacks({
     }).catch(err => {
       process.stderr.write(`discord channel: failed to deliver tts_failed event: ${err}\n`)
     })
+  },
+
+  // Finalised transcripts from Deepgram. Wake-word match → emit <voice>
+  // inbound so the main session sees it as a directed message; otherwise
+  // drop silently (zero model cost, TSV-logging comes in a later commit).
+  onTranscript: async r => {
+    if (!WAKE_WORD_RE.test(r.text)) return
+    const username = await resolveUsername(r.userId)
+    mcp.notification({
+      method: 'notifications/claude/channel',
+      params: {
+        content: r.text,
+        meta: {
+          source: 'voice',
+          channel_id: r.channelId,
+          guild_id: r.guildId,
+          user: username,
+          user_id: r.userId,
+          ts: new Date().toISOString(),
+          confidence: r.confidence.toFixed(3),
+          latency_ms: String(r.latencyMs),
+        },
+      },
+    }).catch(err => {
+      process.stderr.write(`discord channel: failed to deliver voice transcript: ${err}\n`)
+    })
+  },
+
+  // Deepgram-side errors: best-effort log only. Repeated failures + circuit
+  // breaker land in a later commit (phase-2 graceful degradation).
+  onSTTError: ({ guildId, channelId, userId, reason }) => {
+    process.stderr.write(`discord channel: stt error guild=${guildId} channel=${channelId} user=${userId}: ${reason}\n`)
   },
 })
 
