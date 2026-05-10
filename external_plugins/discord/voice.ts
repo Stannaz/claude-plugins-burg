@@ -457,10 +457,11 @@ function wireSTT(client: Client, state: GuildVoiceState): void {
   const botUserId = client.user?.id
   const receiver = state.connection.receiver
 
+  logVoice(`stt: wireSTT attached, listenerCount=${receiver.speaking.listenerCount('start')}`)
   receiver.speaking.on('start', userId => {
-    logVoice(`stt: speaking.start fired userId=${userId}`)
     if (userId === botUserId) return
     if (state.sttSessions.has(userId)) return
+    logVoice(`stt: NEW speaking.start userId=${userId} listeners=${receiver.speaking.listenerCount('start')}`)
     if (totalActiveSTTSessions() >= MAX_CONCURRENT_STT) {
       logVoice(`stt: concurrency cap (${MAX_CONCURRENT_STT}) hit, skipping userId=${userId}`)
       return
@@ -494,6 +495,7 @@ function wireSTT(client: Client, state: GuildVoiceState): void {
       logVoice(`stt: receiver.subscribe failed for ${userId}: ${err instanceof Error ? err.message : err}`)
       return
     }
+    logVoice(`stt: subscribed userId=${userId}`)
 
     const session = new STTSession({
       userId,
@@ -501,7 +503,12 @@ function wireSTT(client: Client, state: GuildVoiceState): void {
       channelId: state.channelId,
       opusStream,
       shouldDropPCM: () => Date.now() < state.pcmMutedUntil,
-      onTranscript: r => callbacks.onTranscript?.(r),
+      onTranscript: r => {
+        logVoice(`stt: transcript userId=${userId} text=${JSON.stringify(r.text)} latency=${r.latencyMs}ms`)
+        callbacks.onTranscript?.(r)
+      },
+      onOpen: () => logVoice(`stt: ws open userId=${userId}`),
+      onFirstFrame: () => logVoice(`stt: first PCM frame sent userId=${userId}`),
       onError: err => {
         callbacks.onSTTError?.({
           guildId: state.guildId,
@@ -511,7 +518,11 @@ function wireSTT(client: Client, state: GuildVoiceState): void {
         })
         logVoice(`stt error guild=${state.guildId} user=${userId}: ${err.message}`)
       },
-      onClose: () => {
+      onClose: info => {
+        const codeStr = info?.code !== undefined ? `code=${info.code}` : 'code=?'
+        const reasonStr = info?.reason ? ` reason=${JSON.stringify(info.reason)}` : ''
+        const preOpenStr = info?.preOpen ? ' preOpen=true' : ''
+        logVoice(`stt: session closed userId=${userId} ${codeStr}${reasonStr}${preOpenStr}`)
         state.sttSessions.delete(userId)
       },
     })
