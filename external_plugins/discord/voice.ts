@@ -23,6 +23,7 @@ import {
   AudioPlayerStatus,
   VoiceConnectionStatus,
   StreamType,
+  EndBehaviorType,
   entersState,
   type VoiceConnection,
   type AudioPlayer,
@@ -33,6 +34,7 @@ import { spawn, type ChildProcess } from 'child_process'
 import { mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, appendFileSync } from 'fs'
 import { join } from 'path'
 import type { Readable } from 'stream'
+import { STTSession, type TranscriptResult, deepgramKeyAvailable } from './stt'
 
 const LOCK_DIR = '/root/burg/voice/locks'
 const LOG_FILE = '/root/burg/voice/logs/voice.log'
@@ -52,9 +54,16 @@ type GuildVoiceState = {
   current: QueueItem | null
   /** Children we spawn (edge-tts, ffmpeg) so we can kill them on stop/leave. */
   childProcs: Set<ChildProcess>
+  /** Active STT sessions keyed by userId — one per user currently speaking. */
+  sttSessions: Map<string, STTSession>
 }
 
 const states = new Map<string, GuildVoiceState>()
+
+/** Cap on simultaneous open Deepgram ws across all guilds.
+ *  Per the migration plan: 4 ppl talking = 4 ws is fine and cheap; cap protects
+ *  against pathological cases (e.g. a 20-person stage channel all unmuted). */
+const MAX_CONCURRENT_STT = 6
 
 export type TTSFailure = { guildId: string; channelId: string; reason: string; text: string }
 
@@ -63,6 +72,11 @@ export type VoiceCallbacks = {
    * <voice tts_failed=true ...> inbound event so the main session knows the
    * spoken reply didn't go out. */
   onTTSFailure?: (failure: TTSFailure) => void
+  /** Called once per finalised transcript from Deepgram. server.ts applies the
+   *  wake-word filter and emits the inbound <voice> event. */
+  onTranscript?: (r: TranscriptResult) => void
+  /** Called when a deepgram session errors out (auth, network, etc). */
+  onSTTError?: (info: { guildId: string; channelId: string; userId: string; reason: string }) => void
 }
 
 let callbacks: VoiceCallbacks = {}
@@ -175,8 +189,10 @@ export async function joinVoice(client: Client, channelId: string): Promise<stri
     queue: [],
     current: null,
     childProcs: new Set(),
+    sttSessions: new Map(),
   }
   states.set(guildId, state)
+  wireSTT(client, state)
 
   player.on(AudioPlayerStatus.Idle, () => {
     state.current = null
@@ -196,6 +212,7 @@ export async function joinVoice(client: Client, channelId: string): Promise<stri
       // re-connecting on its own
     } catch {
       logVoice(`voice disconnected in guild ${guildId}, destroying`)
+      killSTTSessions(state)
       try { connection.destroy() } catch {}
       states.delete(guildId)
       releaseLock(guildId)
@@ -214,6 +231,7 @@ export function leaveVoice(guildId?: string): string {
   }
   const s = states.get(target)
   if (!s) return `not connected in guild ${target}`
+  killSTTSessions(s)
   killChildren(s)
   try { s.player.stop(true) } catch {}
   try { s.connection.destroy() } catch {}
@@ -234,6 +252,90 @@ function killChildren(s: GuildVoiceState): void {
     try { child.kill('SIGKILL') } catch {}
   }
   s.childProcs.clear()
+}
+
+function killSTTSessions(s: GuildVoiceState): void {
+  for (const session of s.sttSessions.values()) {
+    try { session.destroy() } catch {}
+  }
+  s.sttSessions.clear()
+}
+
+/** Sum of active STT sessions across every guild — for the global concurrency cap. */
+function totalActiveSTTSessions(): number {
+  let n = 0
+  for (const s of states.values()) n += s.sttSessions.size
+  return n
+}
+
+/**
+ * Wire @discordjs/voice receiver → Deepgram STT.
+ *
+ * Subscribes per-user opus streams when a user starts speaking. The receiver
+ * stream ends naturally after 2s of silence (EndBehaviorType.AfterSilence),
+ * which closes the Deepgram ws. Re-subscribing happens on the next
+ * speaking.start.
+ *
+ * Known limitation (acceptable for v1, noted in plan): subscribing on the
+ * gateway's `speaking.start` event lags raw RTP packet arrival by up to
+ * ~100ms, so the very first ~100ms of the first utterance may be clipped.
+ * Wake word detection is robust to this in practice — humans rarely lead
+ * with the wake word the instant their mic activates.
+ */
+function wireSTT(client: Client, state: GuildVoiceState): void {
+  if (!deepgramKeyAvailable()) {
+    logVoice(`stt: deepgram key unavailable; staying deaf in guild ${state.guildId}`)
+    return
+  }
+  const botUserId = client.user?.id
+  const receiver = state.connection.receiver
+
+  receiver.speaking.on('start', userId => {
+    if (userId === botUserId) return
+    if (state.sttSessions.has(userId)) return
+    if (totalActiveSTTSessions() >= MAX_CONCURRENT_STT) {
+      logVoice(`stt: concurrency cap (${MAX_CONCURRENT_STT}) hit, skipping userId=${userId}`)
+      return
+    }
+
+    let opusStream
+    try {
+      opusStream = receiver.subscribe(userId, {
+        end: { behavior: EndBehaviorType.AfterSilence, duration: 2000 },
+      })
+    } catch (err) {
+      logVoice(`stt: receiver.subscribe failed for ${userId}: ${err instanceof Error ? err.message : err}`)
+      return
+    }
+
+    const session = new STTSession({
+      userId,
+      guildId: state.guildId,
+      channelId: state.channelId,
+      opusStream,
+      onTranscript: r => callbacks.onTranscript?.(r),
+      onError: err => {
+        callbacks.onSTTError?.({
+          guildId: state.guildId,
+          channelId: state.channelId,
+          userId,
+          reason: err.message,
+        })
+        logVoice(`stt error guild=${state.guildId} user=${userId}: ${err.message}`)
+      },
+      onClose: () => {
+        state.sttSessions.delete(userId)
+      },
+    })
+    state.sttSessions.set(userId, session)
+    session.start()
+
+    // Defensive: if the opus stream ends (silence, user leaves), tell the
+    // session to flush — the ws close handler will then drop it from the map.
+    opusStream.on('end', () => {
+      try { session.finish() } catch {}
+    })
+  })
 }
 
 function pickGuild(guildId?: string): GuildVoiceState {
