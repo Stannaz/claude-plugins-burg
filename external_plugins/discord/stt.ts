@@ -70,6 +70,83 @@ export function budgetExceeded(): boolean {
   return dailySpendUsd() >= DAILY_CAP_USD
 }
 
+/* ── Deepgram availability tracker ──────────────────────────────────────────
+ * 3 connection failures in a 60s sliding window flips the plugin "deaf":
+ * future STT sessions are refused, a one-shot inbound event surfaces, and a
+ * 60s health-check ping waits for recovery before we resume. TTS / playback
+ * are unaffected.
+ */
+
+const FAILURE_WINDOW_MS = 60_000
+const FAILURE_THRESHOLD = 3
+const HEALTH_CHECK_INTERVAL_MS = 60_000
+let recentFailures: number[] = []
+let _unavailable = false
+let _lastUnavailableReason = ''
+let healthCheckTimer: ReturnType<typeof setInterval> | null = null
+
+export type AvailabilityListener = {
+  onUnavailable: (reason: string) => void
+  onRecovered: () => void
+}
+let availabilityListener: AvailabilityListener | null = null
+
+export function setAvailabilityListener(l: AvailabilityListener): void {
+  availabilityListener = l
+}
+
+export function deepgramUnavailable(): boolean {
+  return _unavailable
+}
+
+function recordFailure(reason: string): void {
+  const now = Date.now()
+  recentFailures = recentFailures.filter(t => now - t < FAILURE_WINDOW_MS)
+  recentFailures.push(now)
+  if (!_unavailable && recentFailures.length >= FAILURE_THRESHOLD) {
+    _unavailable = true
+    _lastUnavailableReason = reason
+    availabilityListener?.onUnavailable(reason)
+    startHealthCheck()
+  }
+}
+
+function startHealthCheck(): void {
+  if (healthCheckTimer) return
+  healthCheckTimer = setInterval(() => {
+    runHealthCheck().catch(() => {})
+  }, HEALTH_CHECK_INTERVAL_MS)
+}
+
+async function runHealthCheck(): Promise<void> {
+  let token: string
+  try { token = getDeepgramKey() } catch { return }
+  const probeUrl = buildDeepgramUrl()
+  await new Promise<void>(resolve => {
+    const ws = new WebSocket(probeUrl, { headers: { Authorization: `Token ${token}` } })
+    const done = (ok: boolean) => {
+      try { ws.terminate() } catch {}
+      if (ok) markRecovered()
+      resolve()
+    }
+    const timer = setTimeout(() => done(false), 5_000)
+    ws.on('open', () => { clearTimeout(timer); done(true) })
+    ws.on('error', () => { clearTimeout(timer); done(false) })
+  })
+}
+
+function markRecovered(): void {
+  if (!_unavailable) return
+  _unavailable = false
+  recentFailures = []
+  _lastUnavailableReason = ''
+  if (healthCheckTimer) {
+    clearInterval(healthCheckTimer)
+    healthCheckTimer = null
+  }
+  availabilityListener?.onRecovered()
+}
+
 let cachedKey: string | null = null
 function getDeepgramKey(): string {
   if (cachedKey !== null) return cachedKey
@@ -137,6 +214,10 @@ export class STTSession {
   private finalised = false
   /** ms timestamp of first PCM frame sent to deepgram; used for latency reporting. */
   private firstFrameAtMs: number | null = null
+  /** Have we seen the ws 'open' event? Used to classify failures (pre-open
+   *  closures count toward the unavailability tracker; post-open ones
+   *  usually mean the user just stopped speaking). */
+  private wsOpened = false
   private opts: STTSessionOpts
 
   constructor(opts: STTSessionOpts) {
@@ -162,6 +243,7 @@ export class STTSession {
     })
 
     this.ws.on('open', () => {
+      this.wsOpened = true
       if (this.closed) {
         try { this.ws?.close() } catch {}
         return
@@ -203,10 +285,20 @@ export class STTSession {
     })
 
     this.ws.on('error', err => {
+      // Errors before 'open' = connection failure (DNS/auth/network).
+      // After 'open' = mid-stream blip; don't penalise availability.
+      if (!this.wsOpened) recordFailure(`ws error: ${err.message}`)
       this.opts.onError?.(err)
     })
 
-    this.ws.on('close', () => {
+    this.ws.on('close', (code, reasonBuf) => {
+      // Codes 1000/1006 are normal close / abnormal-but-non-deepgram-fault.
+      // Pre-open closes always count; post-open closes only if the server
+      // sent a non-1000 code (e.g. 4xxx auth/billing).
+      if (!this.wsOpened || (code !== 1000 && code !== 1006)) {
+        const reason = reasonBuf?.toString() || `code ${code}`
+        recordFailure(`ws close pre-open=${!this.wsOpened}: ${reason}`)
+      }
       this.cleanup()
     })
   }
