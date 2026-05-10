@@ -458,6 +458,7 @@ function wireSTT(client: Client, state: GuildVoiceState): void {
   const receiver = state.connection.receiver
 
   receiver.speaking.on('start', userId => {
+    logVoice(`stt: speaking.start fired userId=${userId}`)
     if (userId === botUserId) return
     if (state.sttSessions.has(userId)) return
     if (totalActiveSTTSessions() >= MAX_CONCURRENT_STT) {
