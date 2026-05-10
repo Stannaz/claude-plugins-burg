@@ -692,6 +692,17 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
       description: 'Report which voice channels the bot is connected to and what is queued.',
       inputSchema: { type: 'object', properties: {} },
     },
+    {
+      name: 'voice_who',
+      description:
+        'List members currently in voice channels. Pass guild_id to scope to one guild, otherwise reports across every guild the bot is in. Use this before voice_join to pick the right channel.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          guild_id: { type: 'string' },
+        },
+      },
+    },
   ],
 }))
 
@@ -841,6 +852,9 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       case 'voice_status': {
         return { content: [{ type: 'text', text: voiceStatus() }] }
       }
+      case 'voice_who': {
+        return { content: [{ type: 'text', text: voiceWho(args.guild_id as string | undefined) }] }
+      }
       default:
         return {
           content: [{ type: 'text', text: `unknown tool: ${req.params.name}` }],
@@ -874,6 +888,36 @@ async function resolveUsername(userId: string): Promise<string> {
   } catch {
     return userId
   }
+}
+
+function voiceWho(guildId?: string): string {
+  const guilds = guildId
+    ? [client.guilds.cache.get(guildId)].filter(Boolean)
+    : [...client.guilds.cache.values()]
+  if (guilds.length === 0) {
+    return guildId ? `not in guild ${guildId}` : '(bot not in any guild)'
+  }
+  const lines: string[] = []
+  for (const g of guilds) {
+    if (!g) continue
+    const voiceChans = g.channels.cache.filter(
+      c => c.type === ChannelType.GuildVoice || c.type === ChannelType.GuildStageVoice,
+    )
+    const populated = [...voiceChans.values()].filter(c => 'members' in c && c.members.size > 0)
+    if (populated.length === 0) {
+      lines.push(`${g.name} (${g.id}): no one in voice`)
+      continue
+    }
+    lines.push(`${g.name} (${g.id}):`)
+    for (const ch of populated) {
+      if (!('members' in ch)) continue
+      const members = [...ch.members.values()]
+        .map(m => `${m.user.username}${m.user.id === client.user?.id ? ' [me]' : ''}`)
+        .join(', ')
+      lines.push(`  #${ch.name} (${ch.id}): ${members}`)
+    }
+  }
+  return lines.join('\n')
 }
 
 setVoiceCallbacks({
