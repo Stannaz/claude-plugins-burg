@@ -1,0 +1,366 @@
+/**
+ * Voice transport for the discord MCP plugin.
+ *
+ * Phase 1: voice gateway connection, audio playback, edge-tts TTS.
+ * No STT, no wake-word filter, no streaming chunker — those land in
+ * later phases. See /root/burgplans/voice-fork-migration.md.
+ *
+ * Per-guild state:
+ *   - VoiceConnection (one per guild — Discord's hard limit)
+ *   - AudioPlayer
+ *   - FIFO queue of items to play (file path | TTS text)
+ *   - lockfile so a second plugin instance for the same guild bails
+ *
+ * The plugin is stdio-spawned by Claude Code, so all state here lives only
+ * for the duration of this Claude Code session. Lockfiles get cleared in
+ * shutdown(), and stale locks (PID gone) are reclaimed on the next join.
+ */
+
+import {
+  joinVoiceChannel,
+  createAudioPlayer,
+  createAudioResource,
+  AudioPlayerStatus,
+  VoiceConnectionStatus,
+  StreamType,
+  entersState,
+  type VoiceConnection,
+  type AudioPlayer,
+} from '@discordjs/voice'
+import type { Client, VoiceBasedChannel } from 'discord.js'
+import { ChannelType } from 'discord.js'
+import { spawn, type ChildProcessWithoutNullStreams } from 'child_process'
+import { mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, appendFileSync } from 'fs'
+import { join } from 'path'
+import type { Readable } from 'stream'
+
+const LOCK_DIR = '/root/burg/voice/locks'
+const LOG_FILE = '/root/burg/voice/logs/voice.log'
+const TTS_VOICE_DEFAULT = 'en-GB-RyanNeural'
+
+type QueueItem =
+  | { kind: 'file'; path: string }
+  | { kind: 'tts'; text: string; voice: string }
+  | { kind: 'stream'; stream: Readable; inputType: StreamType }
+
+type GuildVoiceState = {
+  guildId: string
+  channelId: string
+  connection: VoiceConnection
+  player: AudioPlayer
+  queue: QueueItem[]
+  current: QueueItem | null
+  /** Children we spawn (edge-tts, ffmpeg) so we can kill them on stop/leave. */
+  childProcs: Set<ChildProcessWithoutNullStreams>
+}
+
+const states = new Map<string, GuildVoiceState>()
+
+export type TTSFailure = { guildId: string; channelId: string; reason: string; text: string }
+
+export type VoiceCallbacks = {
+  /** Called when an edge-tts invocation fails. Plugin surfaces this as a one-shot
+   * <voice tts_failed=true ...> inbound event so the main session knows the
+   * spoken reply didn't go out. */
+  onTTSFailure?: (failure: TTSFailure) => void
+}
+
+let callbacks: VoiceCallbacks = {}
+
+export function setVoiceCallbacks(cb: VoiceCallbacks): void {
+  callbacks = cb
+}
+
+function logVoice(line: string): void {
+  try {
+    mkdirSync('/root/burg/voice/logs', { recursive: true })
+    appendFileSync(LOG_FILE, `[${new Date().toISOString()}] ${line}\n`)
+  } catch {}
+}
+
+function lockPath(guildId: string): string {
+  return join(LOCK_DIR, `${guildId}.lock`)
+}
+
+function isPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
+
+function tryAcquireLock(guildId: string): { ok: true } | { ok: false; holder: number } {
+  mkdirSync(LOCK_DIR, { recursive: true })
+  const path = lockPath(guildId)
+  if (existsSync(path)) {
+    let holder = 0
+    try {
+      holder = parseInt(readFileSync(path, 'utf8').trim(), 10)
+    } catch {}
+    if (holder && holder !== process.pid && isPidAlive(holder)) {
+      return { ok: false, holder }
+    }
+  }
+  writeFileSync(path, String(process.pid))
+  return { ok: true }
+}
+
+function releaseLock(guildId: string): void {
+  const path = lockPath(guildId)
+  try {
+    if (!existsSync(path)) return
+    const holder = parseInt(readFileSync(path, 'utf8').trim(), 10)
+    if (holder === process.pid) rmSync(path, { force: true })
+  } catch {}
+}
+
+/**
+ * Join a voice channel by id. Returns the resolved guild id on success.
+ * Throws on permission/connection failures with a human-readable string.
+ */
+export async function joinVoice(client: Client, channelId: string): Promise<string> {
+  const ch = await client.channels.fetch(channelId)
+  if (!ch || ch.type !== ChannelType.GuildVoice && ch.type !== ChannelType.GuildStageVoice) {
+    throw new Error(`channel ${channelId} is not a voice channel`)
+  }
+  const voiceCh = ch as VoiceBasedChannel
+  const me = voiceCh.guild.members.me ?? (await voiceCh.guild.members.fetchMe())
+  const perms = voiceCh.permissionsFor(me)
+  if (!perms?.has('Connect') || !perms?.has('Speak')) {
+    throw new Error(`missing voice perms in #${voiceCh.name} (need Connect + Speak)`)
+  }
+
+  const guildId = voiceCh.guild.id
+  const lock = tryAcquireLock(guildId)
+  if (!lock.ok) {
+    throw new Error(`another plugin instance (pid ${lock.holder}) holds the voice lock for guild ${guildId}`)
+  }
+
+  // If we're already in a channel for this guild, just move.
+  const existing = states.get(guildId)
+  if (existing && existing.channelId === channelId) {
+    return guildId
+  }
+  if (existing) {
+    existing.connection.destroy()
+    states.delete(guildId)
+  }
+
+  const connection = joinVoiceChannel({
+    channelId,
+    guildId,
+    adapterCreator: voiceCh.guild.voiceAdapterCreator,
+    selfDeaf: false,
+    selfMute: false,
+  })
+
+  try {
+    await entersState(connection, VoiceConnectionStatus.Ready, 15_000)
+  } catch (err) {
+    connection.destroy()
+    releaseLock(guildId)
+    throw new Error(`voice connection never became ready: ${err instanceof Error ? err.message : err}`)
+  }
+
+  const player = createAudioPlayer()
+  connection.subscribe(player)
+
+  const state: GuildVoiceState = {
+    guildId,
+    channelId,
+    connection,
+    player,
+    queue: [],
+    current: null,
+    childProcs: new Set(),
+  }
+  states.set(guildId, state)
+
+  player.on(AudioPlayerStatus.Idle, () => {
+    state.current = null
+    void runQueue(state)
+  })
+  player.on('error', err => {
+    logVoice(`player error in guild ${guildId}: ${err.message}`)
+    state.current = null
+    void runQueue(state)
+  })
+  connection.on(VoiceConnectionStatus.Disconnected, async () => {
+    try {
+      await Promise.race([
+        entersState(connection, VoiceConnectionStatus.Signalling, 5_000),
+        entersState(connection, VoiceConnectionStatus.Connecting, 5_000),
+      ])
+      // re-connecting on its own
+    } catch {
+      logVoice(`voice disconnected in guild ${guildId}, destroying`)
+      try { connection.destroy() } catch {}
+      states.delete(guildId)
+      releaseLock(guildId)
+    }
+  })
+
+  logVoice(`joined voice channel ${channelId} in guild ${guildId}`)
+  return guildId
+}
+
+export function leaveVoice(guildId?: string): string {
+  const target = guildId ?? (states.size === 1 ? [...states.keys()][0] : undefined)
+  if (!target) {
+    if (states.size === 0) return 'not connected to any voice channel'
+    throw new Error(`multiple guilds connected, specify guild_id`)
+  }
+  const s = states.get(target)
+  if (!s) return `not connected in guild ${target}`
+  killChildren(s)
+  try { s.player.stop(true) } catch {}
+  try { s.connection.destroy() } catch {}
+  states.delete(target)
+  releaseLock(target)
+  logVoice(`left voice in guild ${target}`)
+  return `left voice in guild ${target}`
+}
+
+export function leaveAll(): void {
+  for (const guildId of [...states.keys()]) {
+    try { leaveVoice(guildId) } catch {}
+  }
+}
+
+function killChildren(s: GuildVoiceState): void {
+  for (const child of s.childProcs) {
+    try { child.kill('SIGKILL') } catch {}
+  }
+  s.childProcs.clear()
+}
+
+function pickGuild(guildId?: string): GuildVoiceState {
+  if (guildId) {
+    const s = states.get(guildId)
+    if (!s) throw new Error(`not connected in guild ${guildId} — call voice_join first`)
+    return s
+  }
+  if (states.size === 0) throw new Error('not connected to any voice channel — call voice_join first')
+  if (states.size === 1) return [...states.values()][0]
+  throw new Error('multiple guilds connected, specify guild_id')
+}
+
+export function enqueueFile(path: string, guildId?: string): void {
+  const s = pickGuild(guildId)
+  s.queue.push({ kind: 'file', path })
+  void runQueue(s)
+}
+
+export function enqueueTTS(text: string, voice = TTS_VOICE_DEFAULT, guildId?: string): void {
+  const s = pickGuild(guildId)
+  // voice_say always wins — clear queue + stop current. Per the plan, music
+  // playback is text-side only and never auto-resumes.
+  s.queue = s.queue.filter(item => item.kind === 'tts')
+  if (s.current && s.current.kind !== 'tts') {
+    killChildren(s)
+    try { s.player.stop(true) } catch {}
+  }
+  s.queue.push({ kind: 'tts', text, voice })
+  void runQueue(s)
+}
+
+export function stopPlayback(guildId?: string): void {
+  const s = pickGuild(guildId)
+  s.queue = []
+  killChildren(s)
+  try { s.player.stop(true) } catch {}
+}
+
+export function status(): string {
+  if (states.size === 0) return 'not connected'
+  const lines: string[] = []
+  for (const s of states.values()) {
+    const cur = s.current ? describeItem(s.current) : 'idle'
+    lines.push(`guild ${s.guildId} channel ${s.channelId}: ${cur} (queued: ${s.queue.length})`)
+  }
+  return lines.join('\n')
+}
+
+function describeItem(item: QueueItem): string {
+  if (item.kind === 'file') return `file ${item.path}`
+  if (item.kind === 'tts') return `tts "${item.text.slice(0, 40)}${item.text.length > 40 ? '…' : ''}"`
+  return 'stream'
+}
+
+async function runQueue(s: GuildVoiceState): Promise<void> {
+  if (s.current) return
+  const next = s.queue.shift()
+  if (!next) return
+  s.current = next
+  try {
+    if (next.kind === 'file') {
+      await playFileNow(s, next.path)
+    } else if (next.kind === 'tts') {
+      await playTTSNow(s, next.text, next.voice)
+    } else {
+      await playStreamNow(s, next.stream, next.inputType)
+    }
+  } catch (err) {
+    logVoice(`queue item failed: ${err instanceof Error ? err.message : err}`)
+    s.current = null
+    void runQueue(s)
+  }
+}
+
+async function playFileNow(s: GuildVoiceState, path: string): Promise<void> {
+  const resource = createAudioResource(path, { inputType: StreamType.Arbitrary })
+  s.player.play(resource)
+}
+
+async function playStreamNow(s: GuildVoiceState, stream: Readable, inputType: StreamType): Promise<void> {
+  const resource = createAudioResource(stream, { inputType })
+  s.player.play(resource)
+}
+
+/**
+ * TTS via edge-tts CLI → MP3 stdout → ffmpeg → @discordjs/voice transcoder
+ * (StreamType.Arbitrary makes prism-media's FFmpeg handle the rest).
+ *
+ * On edge-tts spawn or non-zero exit, surface a tts_failed callback so the
+ * main session knows the spoken reply didn't go out.
+ */
+async function playTTSNow(s: GuildVoiceState, text: string, voice: string): Promise<void> {
+  const proc = spawn('edge-tts', ['--voice', voice, '--text', text], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+  }) as ChildProcessWithoutNullStreams
+  s.childProcs.add(proc)
+  let stderr = ''
+  proc.stderr.on('data', d => { stderr += d.toString() })
+
+  const failureFired = { v: false }
+  const fail = (reason: string) => {
+    if (failureFired.v) return
+    failureFired.v = true
+    logVoice(`edge-tts failed in guild ${s.guildId}: ${reason}`)
+    callbacks.onTTSFailure?.({ guildId: s.guildId, channelId: s.channelId, reason, text })
+  }
+
+  proc.on('error', err => {
+    fail(`spawn error: ${err.message}`)
+    s.childProcs.delete(proc)
+  })
+  proc.on('exit', (code, signal) => {
+    s.childProcs.delete(proc)
+    if (signal === 'SIGKILL') return // we killed it ourselves (stop/leave)
+    if (code !== 0) {
+      const tail = stderr.split('\n').filter(Boolean).slice(-3).join(' | ').slice(0, 240)
+      fail(`exit ${code}${tail ? `: ${tail}` : ''}`)
+    }
+  })
+
+  const resource = createAudioResource(proc.stdout, { inputType: StreamType.Arbitrary })
+  s.player.play(resource)
+}
+
+// Voice connections must be torn down on plugin shutdown — leaving them open
+// holds Discord-side voice state and prevents reconnection until timeout.
+export function shutdownVoice(): void {
+  leaveAll()
+}
