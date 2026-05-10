@@ -857,9 +857,10 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
 })
 
 // Wake-word filter on each finalised transcript. Includes common Deepgram
-// mishearings of "burg" (berg, burke, bork, borg) since the wake word is short
-// and unusual enough that ASR confidently substitutes a more common homophone.
-const WAKE_WORD_RE = /\b(burg|berg|burke|bork|borg)\b/i
+// mishearings of "burg" (berg, burke, bork, borg, doug) since the wake word
+// is short and unusual enough that ASR confidently substitutes a more common
+// homophone. Add new mishearings here as voice-YYYY-MM-DD.tsv reveals them.
+const WAKE_WORD_RE = /\b(burg|berg|burke|bork|borg|doug)\b/i
 
 // Username cache so we don't hammer the Discord API every utterance.
 const usernameCache = new Map<string, string>()
