@@ -856,10 +856,10 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
   }
 })
 
-// Wake-word filter: case-insensitive `\bburg\b` on each finalised transcript.
-// Plan §phase-3 puts the cooldown gate here too; that lands in a later commit
-// alongside the bot-echo dedupe.
-const WAKE_WORD_RE = /\bburg\b/i
+// Wake-word filter on each finalised transcript. Includes common Deepgram
+// mishearings of "burg" (berg, burke, bork, borg) since the wake word is short
+// and unusual enough that ASR confidently substitutes a more common homophone.
+const WAKE_WORD_RE = /\b(burg|berg|burke|bork|borg)\b/i
 
 // Username cache so we don't hammer the Discord API every utterance.
 const usernameCache = new Map<string, string>()
