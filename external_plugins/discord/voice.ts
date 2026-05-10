@@ -34,7 +34,14 @@ import { spawn, type ChildProcess } from 'child_process'
 import { mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, appendFileSync } from 'fs'
 import { join } from 'path'
 import type { Readable } from 'stream'
-import { STTSession, type TranscriptResult, deepgramKeyAvailable, budgetExceeded } from './stt'
+import {
+  STTSession,
+  type TranscriptResult,
+  deepgramKeyAvailable,
+  budgetExceeded,
+  deepgramUnavailable,
+  setAvailabilityListener,
+} from './stt'
 
 const LOCK_DIR = '/root/burg/voice/locks'
 const LOG_DIR = '/root/burg/voice/logs'
@@ -108,12 +115,21 @@ export type VoiceCallbacks = {
   onSTTError?: (info: { guildId: string; channelId: string; userId: string; reason: string }) => void
   /** Called once-per-day-per-guild when the budget cap stops new sessions. */
   onBudgetExceeded?: (info: { guildId: string; channelId: string }) => void
+  /** Repeated Deepgram failures tripped the breaker; STT is silently off. */
+  onDeepgramUnavailable?: (info: { reason: string }) => void
+  /** Health check succeeded; STT is back. */
+  onDeepgramRecovered?: () => void
 }
 
 let callbacks: VoiceCallbacks = {}
 
 export function setVoiceCallbacks(cb: VoiceCallbacks): void {
   callbacks = cb
+  // Plumb stt.ts availability transitions out through the same callback bag.
+  setAvailabilityListener({
+    onUnavailable: reason => callbacks.onDeepgramUnavailable?.({ reason }),
+    onRecovered: () => callbacks.onDeepgramRecovered?.(),
+  })
 }
 
 function logVoice(line: string): void {
@@ -459,6 +475,12 @@ function wireSTT(client: Client, state: GuildVoiceState): void {
         })
       }
       logVoice(`stt: budget exceeded, refusing new session for userId=${userId}`)
+      return
+    }
+    if (deepgramUnavailable()) {
+      // Health check is running on its own timer; just refuse new sessions
+      // until it flips back. The inbound event was already emitted by the
+      // availability listener.
       return
     }
 

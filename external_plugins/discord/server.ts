@@ -971,6 +971,41 @@ setVoiceCallbacks({
       process.stderr.write(`discord channel: failed to deliver budget event: ${err}\n`)
     })
   },
+
+  // Repeated Deepgram failures: surface a one-shot so the main session
+  // knows transcripts have stopped arriving (and won't be confused by
+  // sudden silence in vc).
+  onDeepgramUnavailable: ({ reason }) => {
+    mcp.notification({
+      method: 'notifications/claude/channel',
+      params: {
+        content: `(deepgram unreachable — voice transcription paused. reason: ${reason})`,
+        meta: {
+          source: 'voice',
+          deepgram_unavailable: 'true',
+          reason,
+          ts: new Date().toISOString(),
+        },
+      },
+    }).catch(err => {
+      process.stderr.write(`discord channel: failed to deliver dg-unavailable event: ${err}\n`)
+    })
+  },
+  onDeepgramRecovered: () => {
+    mcp.notification({
+      method: 'notifications/claude/channel',
+      params: {
+        content: '(deepgram recovered — voice transcription resumed)',
+        meta: {
+          source: 'voice',
+          deepgram_recovered: 'true',
+          ts: new Date().toISOString(),
+        },
+      },
+    }).catch(err => {
+      process.stderr.write(`discord channel: failed to deliver dg-recovered event: ${err}\n`)
+    })
+  },
 })
 
 await mcp.connect(new StdioServerTransport())
