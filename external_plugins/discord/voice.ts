@@ -80,6 +80,11 @@ type GuildVoiceState = {
   /** True once a budget_exceeded inbound was emitted today, so we don't
    *  spam the main session with repeats. */
   budgetEventSent: boolean
+  /** Wall-clock ms timestamp of the last time any non-bot member was
+   *  present in this voice channel. Drives idle auto-leave. */
+  lastNonBotPresentMs: number
+  /** Periodic checker (presence + auto-leave). Cleared on leave/destroy. */
+  presenceCheck: ReturnType<typeof setInterval> | null
 }
 
 const states = new Map<string, GuildVoiceState>()
@@ -272,9 +277,15 @@ export async function joinVoice(client: Client, channelId: string): Promise<stri
     pcmMutedUntil: 0,
     ttsActive: false,
     budgetEventSent: false,
+    lastNonBotPresentMs: Date.now(),
+    presenceCheck: null,
   }
   states.set(guildId, state)
   wireSTT(client, state)
+  state.presenceCheck = setInterval(() => checkPresence(client, state), 60_000)
+  // Initial poll so the timer is grounded against the channel's current
+  // membership rather than the moment we joined.
+  checkPresence(client, state)
 
   /** PCM-mute window after each TTS chunk to suppress immediate echo back
    *  through Deepgram. Belt-and-braces alongside the text-level dedupe in
@@ -315,6 +326,7 @@ export async function joinVoice(client: Client, channelId: string): Promise<stri
       // re-connecting on its own
     } catch {
       logVoice(`voice disconnected in guild ${guildId}, destroying`)
+      clearPresenceCheck(state)
       killSTTSessions(state)
       try { connection.destroy() } catch {}
       states.delete(guildId)
@@ -334,6 +346,7 @@ export function leaveVoice(guildId?: string): string {
   }
   const s = states.get(target)
   if (!s) return `not connected in guild ${target}`
+  clearPresenceCheck(s)
   killSTTSessions(s)
   killChildren(s)
   try { s.player.stop(true) } catch {}
@@ -362,6 +375,41 @@ function killSTTSessions(s: GuildVoiceState): void {
     try { session.destroy() } catch {}
   }
   s.sttSessions.clear()
+}
+
+function clearPresenceCheck(s: GuildVoiceState): void {
+  if (s.presenceCheck) {
+    clearInterval(s.presenceCheck)
+    s.presenceCheck = null
+  }
+}
+
+/** Idle-auto-leave threshold: 5 minutes alone in voice channel. */
+const IDLE_LEAVE_MS = 5 * 60_000
+
+/**
+ * Polls the voice channel for non-bot members. If the bot has been alone for
+ * IDLE_LEAVE_MS, leave the channel — frees the connection slot and
+ * incidentally guarantees no stale STT subscriptions linger if a "speaking
+ * stop" gateway event ever got dropped.
+ */
+function checkPresence(client: Client, state: GuildVoiceState): void {
+  const ch = client.channels.cache.get(state.channelId)
+  if (!ch || (ch.type !== ChannelType.GuildVoice && ch.type !== ChannelType.GuildStageVoice)) {
+    return
+  }
+  const voiceCh = ch as VoiceBasedChannel
+  const others = voiceCh.members.filter(m => !m.user.bot).size
+  if (others > 0) {
+    state.lastNonBotPresentMs = Date.now()
+    return
+  }
+  if (Date.now() - state.lastNonBotPresentMs > IDLE_LEAVE_MS) {
+    logVoice(`auto-leave: alone in guild ${state.guildId} for >${IDLE_LEAVE_MS / 60_000}min, leaving`)
+    try { leaveVoice(state.guildId) } catch (err) {
+      logVoice(`auto-leave failed: ${err instanceof Error ? err.message : err}`)
+    }
+  }
 }
 
 /** Sum of active STT sessions across every guild — for the global concurrency cap. */
