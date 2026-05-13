@@ -108,8 +108,8 @@ export type VoiceCallbacks = {
    * <voice tts_failed=true ...> inbound event so the main session knows the
    * spoken reply didn't go out. */
   onTTSFailure?: (failure: TTSFailure) => void
-  /** Called once per finalised transcript from Deepgram. server.ts applies the
-   *  wake-word filter and emits the inbound <voice> event. */
+  /** Called once per finalised transcript from Deepgram. server.ts forwards
+   *  every transcript as an inbound <voice> event (echo-guarded). */
   onTranscript?: (r: TranscriptResult) => void
   /** Called when a deepgram session errors out (auth, network, etc). */
   onSTTError?: (info: { guildId: string; channelId: string; userId: string; reason: string }) => void
@@ -141,7 +141,6 @@ function logVoice(line: string): void {
 
 export type GateDecision =
   | 'forwarded'
-  | 'skipped_no_wake'
   | 'skipped_cooldown'
   | 'skipped_echo_match'
   | 'skipped_budget'
@@ -446,8 +445,6 @@ function totalActiveSTTSessions(): number {
  * Known limitation (acceptable for v1, noted in plan): subscribing on the
  * gateway's `speaking.start` event lags raw RTP packet arrival by up to
  * ~100ms, so the very first ~100ms of the first utterance may be clipped.
- * Wake word detection is robust to this in practice — humans rarely lead
- * with the wake word the instant their mic activates.
  */
 function wireSTT(client: Client, state: GuildVoiceState): void {
   if (!deepgramKeyAvailable()) {
@@ -619,8 +616,8 @@ function jaccard(a: string[], b: string[]): number {
 
 /**
  * Returns true if `transcript` looks like an echo of something the bot said in
- * the last 5 seconds. Used by server.ts to drop self-heard transcripts before
- * the wake-word filter runs.
+ * the last 5 seconds. Used by server.ts to drop self-heard transcripts so the
+ * bot doesn't loop on its own TTS.
  */
 export function isLikelyBotEcho(transcript: string, guildId: string): boolean {
   const s = states.get(guildId)

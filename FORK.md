@@ -26,7 +26,7 @@ Read this *before* grepping the filesystem.
 ### Voice (transport + STT)
 
 - `/root/burg/voice/logs/voice.log` — newline-delimited event log: voice join/leave, `speaking.start`, deepgram ws lifecycle, finalised transcripts. Source: `voice.ts` `voiceLog()`.
-- `/root/burg/voice/logs/voice-YYYY-MM-DD.tsv` — one row per finalised transcript with `gate_decision` (`skipped_no_wake` / `skipped_echo_match` / `passed`). **This is the file to read when "u didn't reply when i said burg"** — the row tells you what deepgram actually heard and why it gated. TTS-out is appended to the same file with `direction=out`.
+- `/root/burg/voice/logs/voice-YYYY-MM-DD.tsv` — one row per finalised transcript with `gate_decision` (`forwarded` / `skipped_echo_match` / `skipped_cooldown` / etc). **This is the file to read when "u didn't reply when i spoke"** — the row tells you what deepgram actually heard and whether it was forwarded to the session. TTS-out is appended to the same file with `direction=out`.
 
 Both paths are hardcoded in `external_plugins/discord/voice.ts` (`LOG_DIR = '/root/burg/voice/logs'`). To relocate, change there — those two are the only writers.
 
@@ -38,15 +38,16 @@ Claude Code captures the MCP server's stderr at:
 
 One file per Claude Code launch. Each line is `{debug|error, timestamp, sessionId, cwd}`. Use this for: gateway connect failures, login errors, voice_join failures, unhandled rejections, anything `process.stderr.write(...)` in `server.ts`. Newest file = current session (sort by mtime).
 
-### Wake-word debugging
+### Voice transcript debugging
 
-If you said "burg" and the bot didn't react:
+The wake-word gate was removed 2026-05-13 — every finalised transcript is now forwarded as a `<voice>` inbound (echo-guard still applies so the bot doesn't loop on its own TTS).
+
+If you spoke in VC and the bot didn't react:
 
 1. Open today's `/root/burg/voice/logs/voice-YYYY-MM-DD.tsv`.
 2. Find your row by timestamp.
-3. Read the `text` column — that's what deepgram actually heard.
-4. If `gate_decision = skipped_no_wake`, deepgram misheard. Add the mishearing to `WAKE_WORD_RE` in `server.ts` (alongside `burg|berg|burke|bork|borg|doug|burger|...`).
-5. Restart Claude Code (`/exit` → relaunch) so server.ts reloads.
+3. Read the `text` column — that's what deepgram actually heard. If it's empty/garbled, that's an STT problem, not a gate problem.
+4. Check `gate_decision`: `forwarded` = bot saw it and chose not to reply (judgement call); `skipped_echo_match` = bot heard its own TTS; otherwise see the `GateDecision` union in `voice.ts`.
 
 ### Old python bot (decommissioned)
 
