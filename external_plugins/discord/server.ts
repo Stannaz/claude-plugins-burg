@@ -870,12 +870,6 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
   }
 })
 
-// Wake-word filter on each finalised transcript. Includes common Deepgram
-// mishearings of "burg" (berg, burke, bork, borg, doug, burger) since the wake word
-// is short and unusual enough that ASR confidently substitutes a more common
-// homophone. Add new mishearings here as voice-YYYY-MM-DD.tsv reveals them.
-const WAKE_WORD_RE = /\b(burg|berg|burke|bork|borg|doug|burger)\b/i
-
 // Username cache so we don't hammer the Discord API every utterance.
 const usernameCache = new Map<string, string>()
 async function resolveUsername(userId: string): Promise<string> {
@@ -943,10 +937,11 @@ setVoiceCallbacks({
     })
   },
 
-  // Finalised transcripts from Deepgram. Wake-word match → emit <voice>
-  // inbound so the main session sees it as a directed message; otherwise
-  // drop silently (zero model cost). Every transcript is TSV-logged with
-  // the gate decision so "why didn't u respond" debugging is one Read away.
+  // Finalised transcripts from Deepgram are forwarded as <voice> inbounds
+  // unconditionally — the bot listens to everything in VC and decides
+  // whether to reply itself. Echo-guard still applies (don't loop on our
+  // own TTS). Every transcript is TSV-logged so "why didn't u respond"
+  // debugging is one Read away.
   onTranscript: async r => {
     const username = await resolveUsername(r.userId)
     if (isLikelyBotEcho(r.text, r.guildId)) {
@@ -954,14 +949,6 @@ setVoiceCallbacks({
         speakerId: r.userId, speakerName: username, direction: 'in',
         text: r.text, confidence: r.confidence, latencyMs: r.latencyMs,
         gateDecision: 'skipped_echo_match',
-      })
-      return
-    }
-    if (!WAKE_WORD_RE.test(r.text)) {
-      logUtterance({
-        speakerId: r.userId, speakerName: username, direction: 'in',
-        text: r.text, confidence: r.confidence, latencyMs: r.latencyMs,
-        gateDecision: 'skipped_no_wake',
       })
       return
     }
