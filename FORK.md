@@ -59,7 +59,7 @@ If you spoke in VC and the bot didn't react:
 
 ### Old python bot (decommissioned)
 
-`bot.log`, `voice_bot.log`, `voice_log.tsv` in `/root/burg/voice/logs/` are from the previous python `bot.py`. Inactive. Don't grep these for current state.
+The standalone `discord.py` voice bot was decommissioned 2026-05-10 and removed 2026-05-27. Its source + the old `bot.log` / `voice_bot.log` / `voice_log.tsv` logs are gone from `/root/burg/voice/`; the surviving source (`bot.py.legacy`, `menus.py`, helper scripts, operator `README.md`) now lives under `/root/burg/_archive/voice/`. Nothing in `/root/burg/voice/logs/` is from it any more — those are all current TS-bot logs.
 
 ## Working in this fork — rules for Claude
 
