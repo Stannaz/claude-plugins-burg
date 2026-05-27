@@ -65,7 +65,10 @@ The whole point of the fork is that it stays cleanly rebaseable onto upstream. R
 6. **Don't edit upstream `README.md` files.** Document fork-specific behaviour here in `FORK.md` — that way the upstream READMEs rebase clean.
 7. **Document the diff here.** Anything you add to an upstream plugin gets a short bullet under "Custom additions" so the next rebase knows what to reapply if conflicts force a redo.
 8. **No upstream-unrelated commits in upstream files.** Commits that touch upstream files should *only* contain the burg-specific change. Mixing in fixes you'd otherwise contribute upstream makes it harder to PR them later.
-9. **Test with `bun build`.** Discord plugin: `cd external_plugins/discord && bun install && bun build server.ts --target=bun --outdir=/tmp/x` should succeed before commit.
+9. **Typecheck AND build before commit.** Discord plugin, from `external_plugins/discord`:
+   - **Typecheck (the gate that catches the real bugs):** `bunx tsc --noEmit --skipLibCheck --moduleResolution bundler --module esnext --target esnext --types bun server.ts`. This is what catches an un-imported identifier (e.g. calling `appendFileSync` without importing it from `'fs'`) — `bun build` does **not**, because a bundler treats an unresolved free identifier as a global and emits no error. Skipping this once shipped a silently-no-op'd logger (the call threw `ReferenceError` straight into an empty `catch`). Run it.
+   - **Build:** `bun install && bun build server.ts --target=bun --outdir=/tmp/x --external ffmpeg-static`. The `--external ffmpeg-static` is mandatory: prism-media references that optional native dep but we don't install it (the bot uses system ffmpeg), so a bare `bun build` fails on it regardless of your change.
+   - Both must pass before you commit. Don't rationalise away an error as "unrelated" without proving it — that's how the import bug shipped.
 
 ## Rebasing onto upstream
 
@@ -74,4 +77,4 @@ git fetch upstream
 git rebase upstream/main
 ```
 
-Conflicts will almost always be in `external_plugins/discord/server.ts`. Resolve by reapplying the burg-specific block (look for additions referenced in "Custom additions" above) onto the new upstream code. Re-run the `bun build` check afterwards.
+Conflicts will almost always be in `external_plugins/discord/server.ts`. Resolve by reapplying the burg-specific block (look for additions referenced in "Custom additions" above) onto the new upstream code. Re-run the typecheck + build checks from rule 9 afterwards.
