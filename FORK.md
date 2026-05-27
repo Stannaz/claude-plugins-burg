@@ -30,6 +30,14 @@ Read this *before* grepping the filesystem.
 
 Both paths are hardcoded in `external_plugins/discord/voice.ts` (`LOG_DIR = '/root/burg/voice/logs'`). To relocate, change there — those two are the only writers.
 
+### Channel-plugin event logs (`server.ts`)
+
+Structured, append-only event logs written by `server.ts`'s `channelLog(file, line)` helper (distinct from the voice logs above and from MCP stderr). Each concern gets its own file under `CHANNEL_LOG_DIR = '/root/burg/logs'`; the helper takes a basename and writes `[ISO-timestamp] <line>\n`. It's best-effort — wrapped in a `try/catch{}`, so a write failure never breaks the handler (which is why a missing import once silently produced no file; see rule 9). Current files:
+
+- `/root/burg/logs/alia-join.log` — one line per Ali-A VC-join intro: which channel was joined, which user triggered it, and the guild. Failures log too (`FAILED for <user>...`). Written by the temporary Ali-A `voiceStateUpdate` handler (self-expires 2026-06-12).
+
+To add a new log, call `channelLog('<your-file>.log', '<message>')` from anywhere in `server.ts` — it creates the dir and file on first write. Add the new file to this list when you do.
+
 ### MCP server stderr (`server.ts`)
 
 Claude Code captures the MCP server's stderr at:
