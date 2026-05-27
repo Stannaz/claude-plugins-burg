@@ -1064,6 +1064,19 @@ client.on('error', err => {
   process.stderr.write(`discord channel: client error: ${err}\n`)
 })
 
+// --- channel-plugin log files ----------------------------------------------
+// Append-only logger for the discord *channel* plugin (this file), distinct
+// from voice.ts's /root/burg/voice/logs. Each concern gets its own file under
+// CHANNEL_LOG_DIR — pass the basename. First user is the Ali-A join below;
+// more files will be added over time. Never throws (best-effort logging).
+const CHANNEL_LOG_DIR = '/root/burg/logs'
+function channelLog(file: string, line: string): void {
+  try {
+    mkdirSync(CHANNEL_LOG_DIR, { recursive: true })
+    appendFileSync(join(CHANNEL_LOG_DIR, file), `[${new Date().toISOString()}] ${line}\n`)
+  } catch {}
+}
+
 // --- TEMPORARY: Ali-A intro on VC join (burg fork) --------------------------
 // noci requested 2026-05-27, stannaz-approved for 15 days. Blasts an obnoxious
 // intro sting whenever a user joins a voice channel in the one guild below.
@@ -1080,11 +1093,14 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
   if (!newState.channelId || oldState.channelId === newState.channelId) return
   if (newState.id === client.user?.id) return // never react to our own join — would loop
   if (newState.member?.user?.bot) return // skip other bots too
+  const who = newState.member?.user?.tag ?? newState.id
   try {
     await joinVoice(client, newState.channelId)
     enqueueFile(ALIA_INTRO_PATH, newState.guild.id)
+    channelLog('alia-join.log', `joined ${newState.channelId} and queued intro for ${who} (guild ${newState.guild.id})`)
   } catch (err) {
     process.stderr.write(`alia-join: failed to play intro: ${err}\n`)
+    channelLog('alia-join.log', `FAILED for ${who} in ${newState.channelId}: ${err}`)
   }
 })
 
