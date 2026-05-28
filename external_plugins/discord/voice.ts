@@ -87,11 +87,6 @@ type GuildVoiceState = {
   /** True once a budget_exceeded inbound was emitted today, so we don't
    *  spam the main session with repeats. */
   budgetEventSent: boolean
-  /** Wall-clock ms timestamp of the last time any non-bot member was
-   *  present in this voice channel. Drives idle auto-leave. */
-  lastNonBotPresentMs: number
-  /** Periodic checker (presence + auto-leave). Cleared on leave/destroy. */
-  presenceCheck: ReturnType<typeof setInterval> | null
 }
 
 const states = new Map<string, GuildVoiceState>()
@@ -294,15 +289,9 @@ export async function joinVoice(client: Client, channelId: string): Promise<stri
     pcmMutedUntil: 0,
     ttsActive: false,
     budgetEventSent: false,
-    lastNonBotPresentMs: Date.now(),
-    presenceCheck: null,
   }
   states.set(guildId, state)
   wireSTT(client, state)
-  state.presenceCheck = setInterval(() => checkPresence(client, state), 60_000)
-  // Initial poll so the timer is grounded against the channel's current
-  // membership rather than the moment we joined.
-  checkPresence(client, state)
 
   /** PCM-mute window after each TTS chunk to suppress immediate echo back
    *  through Deepgram. Belt-and-braces alongside the text-level dedupe in
@@ -399,75 +388,19 @@ function killSTTSessions(s: GuildVoiceState): void {
   s.sttSessions.clear()
 }
 
-function clearPresenceCheck(s: GuildVoiceState): void {
-  if (s.presenceCheck) {
-    clearInterval(s.presenceCheck)
-    s.presenceCheck = null
-  }
-}
-
 /**
- * Fully tear a guild's voice state down: stop the presence timer, STT sessions,
- * spawned children and audio, destroy the connection, and drop it from the
- * registry. Does NOT release the lockfile — callers that relinquish the guild
- * (leaveVoice, the disconnect handler) release it explicitly, while a
- * channel-switch keeps the lock and re-uses it for the new connection.
- *
- * Centralising teardown here is what stops leaked presence-check intervals: the
- * channel-switch path used to destroy the connection and delete the map entry
- * without clearing the interval, so orphaned timers kept firing and auto-"left"
- * freshly-joined channels.
+ * Fully tear a guild's voice state down: stop STT sessions, spawned children and
+ * audio, destroy the connection, and drop it from the registry. Does NOT release
+ * the lockfile — callers that relinquish the guild (leaveVoice, the disconnect
+ * handler) release it explicitly, while a channel-switch keeps the lock and
+ * re-uses it for the new connection.
  */
 function teardownState(s: GuildVoiceState): void {
-  clearPresenceCheck(s)
   killSTTSessions(s)
   killChildren(s)
   try { s.player.stop(true) } catch {}
   try { s.connection.destroy() } catch {}
   states.delete(s.guildId)
-}
-
-/** Idle-auto-leave threshold: 5 minutes alone in voice channel. */
-const IDLE_LEAVE_MS = 5 * 60_000
-
-/**
- * Polls the voice channel for non-bot members. If the bot has been alone for
- * IDLE_LEAVE_MS, leave the channel — frees the connection slot and
- * incidentally guarantees no stale STT subscriptions linger if a "speaking
- * stop" gateway event ever got dropped.
- */
-function checkPresence(client: Client, state: GuildVoiceState): void {
-  // Orphan guard: if this interval has outlived its state (the state was torn
-  // down or replaced), stop it and bail — never let a stale timer evict
-  // whatever's now live in the registry. Belt-and-braces alongside teardownState.
-  if (states.get(state.guildId) !== state) {
-    clearPresenceCheck(state)
-    return
-  }
-  const ch = client.channels.cache.get(state.channelId)
-  if (!ch || (ch.type !== ChannelType.GuildVoice && ch.type !== ChannelType.GuildStageVoice)) {
-    return
-  }
-  const voiceCh = ch as VoiceBasedChannel
-  // Count occupants from the guild's voice-state cache rather than
-  // voiceCh.members: the latter silently omits anyone whose GuildMember isn't
-  // cached, which made the bot believe it was alone in a channel full of people
-  // and auto-leave seconds after joining. Comparing voice-state ids against our
-  // own id needs no member resolution.
-  const botId = client.user?.id
-  const others = voiceCh.guild.voiceStates.cache.filter(
-    vs => vs.channelId === state.channelId && vs.id !== botId,
-  ).size
-  if (others > 0) {
-    state.lastNonBotPresentMs = Date.now()
-    return
-  }
-  if (Date.now() - state.lastNonBotPresentMs > IDLE_LEAVE_MS) {
-    logVoice(`auto-leave: alone in guild ${state.guildId} for >${IDLE_LEAVE_MS / 60_000}min, leaving`)
-    try { leaveVoice(state.guildId) } catch (err) {
-      logVoice(`auto-leave failed: ${err instanceof Error ? err.message : err}`)
-    }
-  }
 }
 
 /** Sum of active STT sessions across every guild — for the global concurrency cap. */
@@ -500,10 +433,6 @@ function wireSTT(client: Client, state: GuildVoiceState): void {
   logVoice(`stt: wireSTT attached, listenerCount=${receiver.speaking.listenerCount('start')}`)
   receiver.speaking.on('start', userId => {
     if (userId === botUserId) return
-    // A non-bot speaking is the most reliable "someone's here" signal we have —
-    // feed the idle-leave timer even if the voice-state cache is momentarily
-    // empty, and even for speakers we then skip (cap/budget) below.
-    state.lastNonBotPresentMs = Date.now()
     if (state.sttSessions.has(userId)) return
     logVoice(`stt: NEW speaking.start userId=${userId} listeners=${receiver.speaking.listenerCount('start')}`)
     if (totalActiveSTTSessions() >= MAX_CONCURRENT_STT) {
