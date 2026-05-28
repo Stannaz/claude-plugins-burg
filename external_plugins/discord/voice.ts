@@ -402,6 +402,7 @@ function teardownState(s: GuildVoiceState): void {
   killChildren(s)
   try { s.player.stop(true) } catch {}
   try { s.connection.destroy() } catch {}
+  s.current = null
   states.delete(s.guildId)
 }
 
@@ -553,6 +554,9 @@ export function enqueueTTS(text: string, voice = TTS_VOICE_DEFAULT, guildId?: st
   if (s.current && s.current.kind !== 'tts') {
     killChildren(s)
     try { s.player.stop(true) } catch {}
+    // Clear current so the preempted file's in-flight measure/play bails and
+    // runQueue immediately starts the TTS instead of seeing a stale current.
+    s.current = null
   }
   s.queue.push({ kind: 'tts', text, voice })
   recordBotUtterance(s, text)
@@ -616,6 +620,7 @@ export function stopPlayback(guildId?: string): void {
   s.queue = []
   killChildren(s)
   try { s.player.stop(true) } catch {}
+  s.current = null
 }
 
 export function status(): string {
@@ -654,37 +659,40 @@ async function runQueue(s: GuildVoiceState): Promise<void> {
   }
 }
 
-/** Shared EBU R128 loudness target. Routing both music (playFileNow) and TTS
- *  (playTTSNow) through this means speech and songs sit at the same perceived
- *  volume — hond kept having to ride the volume knob between my voice (~-21
- *  LUFS) and tracks (~-15 LUFS). One-pass loudnorm is used, not two-pass: it
- *  drains the input pipe far faster than realtime so it adds no audible startup
- *  delay, at the cost of a ~2 LU drift on music vs a full analysis pass — a fine
- *  trade for live-queued audio, and it still closes the ~6 LU gap to ~2. */
-const LOUDNORM_FILTER = 'loudnorm=I=-16:TP=-1.5:LRA=11'
+/** Target integrated loudness (LUFS). Every source — TTS and music — is brought
+ *  to this so speech and songs sit at the same perceived volume. Applied as a
+ *  STATIC gain, never dynamic loudnorm: per stannaz, analyse once and set a
+ *  single flat level so the volume never rides/pumps within a track. */
+const TARGET_LUFS = -16
+/** edge-tts is a steady ~-21 LUFS for the default voice, so TTS gets a fixed
+ *  boost instead of a per-utterance analysis pass — spoken replies stay instant
+ *  (no measure step) and land at the same level as normalised music. */
+const TTS_GAIN_DB = 5.2
+/** Brickwall ceiling so a positive static gain can't clip on peaks. Transparent:
+ *  it only catches transients, it does NOT ride the overall level. */
+const NORM_LIMITER = 'alimiter=limit=0.95'
 
 /**
- * Spawn an ffmpeg child that normalises `input` to LOUDNORM_FILTER and emits raw
- * 48k/stereo/s16le PCM on stdout for a StreamType.Raw AudioResource. `input` is
- * either a file path (ffmpeg opens it) or a Readable piped to ffmpeg stdin (e.g.
- * the edge-tts MP3). The child is registered in s.childProcs so stop/leave kills
- * it; it removes itself on exit.
+ * Spawn an ffmpeg child applying audio filter `af`, emitting raw 48k/stereo/s16le
+ * PCM on stdout for a StreamType.Raw AudioResource. `input` is a file path
+ * (ffmpeg opens it) or a Readable piped to stdin (e.g. the edge-tts MP3). The
+ * child is registered in s.childProcs so stop/leave kills it; removes itself on exit.
  */
-function spawnLoudnorm(s: GuildVoiceState, input: string | Readable): ChildProcess {
+function spawnPcm(s: GuildVoiceState, input: string | Readable, af: string): ChildProcess {
   const source = typeof input === 'string' ? input : 'pipe:0'
   const proc = spawn('ffmpeg', [
     '-hide_banner', '-loglevel', 'error',
     '-i', source,
-    '-af', LOUDNORM_FILTER,
+    '-af', af,
     '-f', 's16le', '-ar', '48000', '-ac', '2',
     'pipe:1',
   ], { stdio: ['pipe', 'pipe', 'pipe'] })
   s.childProcs.add(proc)
   proc.on('exit', () => { s.childProcs.delete(proc) })
-  proc.on('error', err => logVoice(`ffmpeg loudnorm spawn error in guild ${s.guildId}: ${err.message}`))
+  proc.on('error', err => logVoice(`ffmpeg pcm spawn error in guild ${s.guildId}: ${err.message}`))
   proc.stderr?.on('data', (d: Buffer) => {
     const line = d.toString().trim()
-    if (line) logVoice(`ffmpeg loudnorm guild ${s.guildId}: ${line}`)
+    if (line) logVoice(`ffmpeg pcm guild ${s.guildId}: ${line}`)
   })
   if (typeof input !== 'string') {
     // If ffmpeg dies first (stop/skip), the source's write side throws EPIPE —
@@ -698,9 +706,52 @@ function spawnLoudnorm(s: GuildVoiceState, input: string | Readable): ChildProce
   return proc
 }
 
+/**
+ * One-shot loudness analysis (the "measure" half of a two-pass normalise). Runs
+ * ffmpeg's loudnorm in JSON print mode over the whole file and resolves with its
+ * measured integrated loudness in LUFS, or null on any failure (caller then
+ * plays at unity gain). The analysis child is tracked so stop/leave kills it.
+ */
+function measureLoudness(s: GuildVoiceState, path: string): Promise<number | null> {
+  return new Promise(resolve => {
+    let proc: ChildProcess
+    try {
+      proc = spawn('ffmpeg', [
+        '-hide_banner', '-i', path,
+        '-af', `loudnorm=I=${TARGET_LUFS}:TP=-1.5:LRA=11:print_format=json`,
+        '-f', 'null', '-',
+      ], { stdio: ['ignore', 'ignore', 'pipe'] })
+    } catch (err) {
+      logVoice(`measureLoudness spawn threw for ${path}: ${err instanceof Error ? err.message : err}`)
+      return resolve(null)
+    }
+    s.childProcs.add(proc)
+    let err = ''
+    proc.stderr?.on('data', (d: Buffer) => { err += d.toString() })
+    proc.on('error', e => { s.childProcs.delete(proc); logVoice(`measureLoudness error: ${e.message}`); resolve(null) })
+    proc.on('exit', () => {
+      s.childProcs.delete(proc)
+      const m = err.match(/\{[\s\S]*\}/)
+      if (!m) return resolve(null)
+      try {
+        const i = parseFloat(JSON.parse(m[0]).input_i)
+        resolve(Number.isFinite(i) ? i : null)
+      } catch { resolve(null) }
+    })
+  })
+}
+
 async function playFileNow(s: GuildVoiceState, path: string): Promise<void> {
-  const ff = spawnLoudnorm(s, path)
-  if (!ff.stdout) throw new Error('ffmpeg loudnorm: stdout pipe did not initialise')
+  // Two-pass: measure the whole file once, then apply ONE static gain so the
+  // track plays at a constant level (no dynamic volume-riding within the song).
+  const measured = await measureLoudness(s, path)
+  // If we were stopped / preempted while measuring, bail — current was cleared
+  // or replaced. Stops a halted track springing back to life after the analysis.
+  const cur = s.current
+  if (!cur || cur.kind !== 'file' || cur.path !== path) return
+  const gainDb = measured != null ? TARGET_LUFS - measured : 0
+  const ff = spawnPcm(s, path, `volume=${gainDb.toFixed(2)}dB,${NORM_LIMITER}`)
+  if (!ff.stdout) throw new Error('ffmpeg pcm: stdout pipe did not initialise')
   const resource = createAudioResource(ff.stdout, { inputType: StreamType.Raw })
   s.player.play(resource)
 }
@@ -711,9 +762,9 @@ async function playStreamNow(s: GuildVoiceState, stream: Readable, inputType: St
 }
 
 /**
- * TTS via edge-tts CLI → MP3 stdout → spawnLoudnorm (ffmpeg loudnorm → raw PCM)
- * → @discordjs/voice as StreamType.Raw. The loudnorm step matches spoken volume
- * to music; see LOUDNORM_FILTER.
+ * TTS via edge-tts CLI → MP3 stdout → spawnPcm (fixed static gain → raw PCM)
+ * → @discordjs/voice as StreamType.Raw. The gain (TTS_GAIN_DB) matches spoken
+ * volume to music with no per-utterance analysis pass.
  *
  * On edge-tts spawn or non-zero exit, surface a tts_failed callback so the
  * main session knows the spoken reply didn't go out.
@@ -750,10 +801,10 @@ async function playTTSNow(s: GuildVoiceState, text: string, voice: string): Prom
     }
   })
 
-  // Route the edge-tts MP3 through the shared loudnorm filter so spoken replies
-  // land at the same level as music (StreamType.Raw = the PCM ffmpeg emits).
-  const ff = spawnLoudnorm(s, proc.stdout)
-  if (!ff.stdout) throw new Error('ffmpeg loudnorm: stdout pipe did not initialise')
+  // edge-tts is a steady ~-21 LUFS, so apply a fixed static boost to land it at
+  // the same level as normalised music — no analysis pass, so replies stay instant.
+  const ff = spawnPcm(s, proc.stdout, `volume=${TTS_GAIN_DB}dB,${NORM_LIMITER}`)
+  if (!ff.stdout) throw new Error('ffmpeg pcm: stdout pipe did not initialise')
   const resource = createAudioResource(ff.stdout, { inputType: StreamType.Raw })
   s.player.play(resource)
 }
