@@ -427,12 +427,27 @@ const IDLE_LEAVE_MS = 5 * 60_000
  * stop" gateway event ever got dropped.
  */
 function checkPresence(client: Client, state: GuildVoiceState): void {
+  // Orphan guard: if this interval has outlived its state (the state was torn
+  // down or replaced), stop it and bail — never let a stale timer evict
+  // whatever's now live in the registry. Belt-and-braces alongside teardownState.
+  if (states.get(state.guildId) !== state) {
+    clearPresenceCheck(state)
+    return
+  }
   const ch = client.channels.cache.get(state.channelId)
   if (!ch || (ch.type !== ChannelType.GuildVoice && ch.type !== ChannelType.GuildStageVoice)) {
     return
   }
   const voiceCh = ch as VoiceBasedChannel
-  const others = voiceCh.members.filter(m => !m.user.bot).size
+  // Count occupants from the guild's voice-state cache rather than
+  // voiceCh.members: the latter silently omits anyone whose GuildMember isn't
+  // cached, which made the bot believe it was alone in a channel full of people
+  // and auto-leave seconds after joining. Comparing voice-state ids against our
+  // own id needs no member resolution.
+  const botId = client.user?.id
+  const others = voiceCh.guild.voiceStates.cache.filter(
+    vs => vs.channelId === state.channelId && vs.id !== botId,
+  ).size
   if (others > 0) {
     state.lastNonBotPresentMs = Date.now()
     return
@@ -475,6 +490,10 @@ function wireSTT(client: Client, state: GuildVoiceState): void {
   logVoice(`stt: wireSTT attached, listenerCount=${receiver.speaking.listenerCount('start')}`)
   receiver.speaking.on('start', userId => {
     if (userId === botUserId) return
+    // A non-bot speaking is the most reliable "someone's here" signal we have —
+    // feed the idle-leave timer even if the voice-state cache is momentarily
+    // empty, and even for speakers we then skip (cap/budget) below.
+    state.lastNonBotPresentMs = Date.now()
     if (state.sttSessions.has(userId)) return
     logVoice(`stt: NEW speaking.start userId=${userId} listeners=${receiver.speaking.listenerCount('start')}`)
     if (totalActiveSTTSessions() >= MAX_CONCURRENT_STT) {
