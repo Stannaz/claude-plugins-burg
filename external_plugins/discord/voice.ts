@@ -654,8 +654,54 @@ async function runQueue(s: GuildVoiceState): Promise<void> {
   }
 }
 
+/** Shared EBU R128 loudness target. Routing both music (playFileNow) and TTS
+ *  (playTTSNow) through this means speech and songs sit at the same perceived
+ *  volume — hond kept having to ride the volume knob between my voice (~-21
+ *  LUFS) and tracks (~-15 LUFS). One-pass loudnorm is used, not two-pass: it
+ *  drains the input pipe far faster than realtime so it adds no audible startup
+ *  delay, at the cost of a ~2 LU drift on music vs a full analysis pass — a fine
+ *  trade for live-queued audio, and it still closes the ~6 LU gap to ~2. */
+const LOUDNORM_FILTER = 'loudnorm=I=-16:TP=-1.5:LRA=11'
+
+/**
+ * Spawn an ffmpeg child that normalises `input` to LOUDNORM_FILTER and emits raw
+ * 48k/stereo/s16le PCM on stdout for a StreamType.Raw AudioResource. `input` is
+ * either a file path (ffmpeg opens it) or a Readable piped to ffmpeg stdin (e.g.
+ * the edge-tts MP3). The child is registered in s.childProcs so stop/leave kills
+ * it; it removes itself on exit.
+ */
+function spawnLoudnorm(s: GuildVoiceState, input: string | Readable): ChildProcess {
+  const source = typeof input === 'string' ? input : 'pipe:0'
+  const proc = spawn('ffmpeg', [
+    '-hide_banner', '-loglevel', 'error',
+    '-i', source,
+    '-af', LOUDNORM_FILTER,
+    '-f', 's16le', '-ar', '48000', '-ac', '2',
+    'pipe:1',
+  ], { stdio: ['pipe', 'pipe', 'pipe'] })
+  s.childProcs.add(proc)
+  proc.on('exit', () => { s.childProcs.delete(proc) })
+  proc.on('error', err => logVoice(`ffmpeg loudnorm spawn error in guild ${s.guildId}: ${err.message}`))
+  proc.stderr?.on('data', (d: Buffer) => {
+    const line = d.toString().trim()
+    if (line) logVoice(`ffmpeg loudnorm guild ${s.guildId}: ${line}`)
+  })
+  if (typeof input !== 'string') {
+    // If ffmpeg dies first (stop/skip), the source's write side throws EPIPE —
+    // swallow errors on both ends so a normal interruption can't crash the plugin.
+    input.on('error', () => {})
+    if (proc.stdin) {
+      proc.stdin.on('error', () => {})
+      input.pipe(proc.stdin)
+    }
+  }
+  return proc
+}
+
 async function playFileNow(s: GuildVoiceState, path: string): Promise<void> {
-  const resource = createAudioResource(path, { inputType: StreamType.Arbitrary })
+  const ff = spawnLoudnorm(s, path)
+  if (!ff.stdout) throw new Error('ffmpeg loudnorm: stdout pipe did not initialise')
+  const resource = createAudioResource(ff.stdout, { inputType: StreamType.Raw })
   s.player.play(resource)
 }
 
@@ -665,8 +711,9 @@ async function playStreamNow(s: GuildVoiceState, stream: Readable, inputType: St
 }
 
 /**
- * TTS via edge-tts CLI → MP3 stdout → ffmpeg → @discordjs/voice transcoder
- * (StreamType.Arbitrary makes prism-media's FFmpeg handle the rest).
+ * TTS via edge-tts CLI → MP3 stdout → spawnLoudnorm (ffmpeg loudnorm → raw PCM)
+ * → @discordjs/voice as StreamType.Raw. The loudnorm step matches spoken volume
+ * to music; see LOUDNORM_FILTER.
  *
  * On edge-tts spawn or non-zero exit, surface a tts_failed callback so the
  * main session knows the spoken reply didn't go out.
@@ -703,7 +750,11 @@ async function playTTSNow(s: GuildVoiceState, text: string, voice: string): Prom
     }
   })
 
-  const resource = createAudioResource(proc.stdout, { inputType: StreamType.Arbitrary })
+  // Route the edge-tts MP3 through the shared loudnorm filter so spoken replies
+  // land at the same level as music (StreamType.Raw = the PCM ffmpeg emits).
+  const ff = spawnLoudnorm(s, proc.stdout)
+  if (!ff.stdout) throw new Error('ffmpeg loudnorm: stdout pipe did not initialise')
+  const resource = createAudioResource(ff.stdout, { inputType: StreamType.Raw })
   s.player.play(resource)
 }
 

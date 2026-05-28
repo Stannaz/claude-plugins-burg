@@ -18,6 +18,10 @@ Inbound messages now carry their reply target. When a Discord user replies to an
 
 A new tool, `fetch_message(chat_id, message_id)`, returns one specific message in full (no truncation) — used when the preview is insufficient or when grabbing a message by id from `fetch_messages` output. Attachments on a replied-to message are retrieved via the existing `download_attachment(chat_id, message_id)`.
 
+### `external_plugins/discord` — voice loudness normalisation
+
+`voice.ts` routes **both** TTS (edge-tts) and music (`voice_play` files) through a single ffmpeg `loudnorm` pass (`LOUDNORM_FILTER`, EBU R128, `I=-16` LUFS) and hands the resulting raw PCM to `@discordjs/voice` as `StreamType.Raw`. Without it, edge-tts (~-21 LUFS) is much quieter than mastered tracks (~-15 LUFS), so listeners had to ride the volume knob between my voice and songs. One-pass (not two-pass) loudnorm: it drains the pipe far faster than realtime, so it adds no audible startup delay, trading ~2 LU of accuracy on music — fine for live-queued audio. **To change the bot's overall level or the matching target, edit `LOUDNORM_FILTER` in `voice.ts` — it's the single knob.**
+
 
 ## Logs — where to look when something breaks
 
