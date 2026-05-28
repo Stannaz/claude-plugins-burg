@@ -35,6 +35,13 @@ function openDb(): Database {
       display_name TEXT,
       last_seen    INTEGER
     );
+    CREATE TABLE IF NOT EXISTS presence_nicks (
+      guild_id  TEXT    NOT NULL,
+      user_id   TEXT    NOT NULL,
+      nick      TEXT,
+      last_seen INTEGER NOT NULL,
+      PRIMARY KEY (guild_id, user_id)
+    );
   `)
   return d
 }
@@ -62,6 +69,19 @@ function record(p: Presence): void {
        display_name = COALESCE(excluded.display_name, presence_users.display_name),
        last_seen = excluded.last_seen`,
     [p.userId, user?.username ?? null, member?.displayName ?? user?.globalName ?? null, ts],
+  )
+
+  // Per-guild server nickname. member.nickname is the literal server nick or
+  // null if the user hasn't set one — we store the null so queries can fall
+  // back to display_name/username via COALESCE.
+  const nick = member?.nickname ?? null
+  db.run(
+    `INSERT INTO presence_nicks (guild_id, user_id, nick, last_seen)
+     VALUES (?, ?, ?, ?)
+     ON CONFLICT(guild_id, user_id) DO UPDATE SET
+       nick = excluded.nick,
+       last_seen = excluded.last_seen`,
+    [p.guild.id, p.userId, nick, ts],
   )
 }
 
