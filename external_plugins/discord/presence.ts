@@ -12,6 +12,7 @@
 
 import { Database } from 'bun:sqlite'
 import type { Client, Presence } from 'discord.js'
+import { ActivityType } from 'discord.js'
 
 const DB_PATH = process.env.PRESENCE_DB_PATH ?? '/root/burg/presence.db'
 
@@ -43,20 +44,38 @@ function openDb(): Database {
       PRIMARY KEY (guild_id, user_id)
     );
   `)
+  // Add activity col idempotently for existing DBs.
+  const cols = d.query("PRAGMA table_info(presence_events)").all() as Array<{ name: string }>
+  if (!cols.some((c) => c.name === 'activity')) {
+    d.exec('ALTER TABLE presence_events ADD COLUMN activity TEXT')
+  }
   return d
+}
+
+function pickActivity(p: Presence): string | null {
+  // First non-custom-status activity wins. Type 4 (Custom) is the user's
+  // freeform status text/emoji, not a game/app. Types 0/1/2/3/5 are
+  // Playing/Streaming/Listening/Watching/Competing — all useful signal.
+  for (const act of p.activities ?? []) {
+    if (act.type === ActivityType.Custom) continue
+    if (act.name) return act.name
+  }
+  return null
 }
 
 function record(p: Presence): void {
   if (!db || !p.userId || !p.guild) return
   const status = p.status ?? 'offline'
+  const activity = pickActivity(p)
   const key = `${p.guild.id}:${p.userId}`
-  if (lastStatus.get(key) === status) return
-  lastStatus.set(key, status)
+  const sig = `${status}|${activity ?? ''}`
+  if (lastStatus.get(key) === sig) return
+  lastStatus.set(key, sig)
 
   const ts = Math.floor(Date.now() / 1000)
   db.run(
-    'INSERT INTO presence_events (user_id, guild_id, status, ts) VALUES (?, ?, ?, ?)',
-    [p.userId, p.guild.id, status, ts],
+    'INSERT INTO presence_events (user_id, guild_id, status, ts, activity) VALUES (?, ?, ?, ?, ?)',
+    [p.userId, p.guild.id, status, ts, activity],
   )
 
   const user = p.user ?? p.member?.user
