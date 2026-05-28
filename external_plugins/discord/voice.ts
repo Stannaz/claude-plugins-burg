@@ -256,8 +256,10 @@ export async function joinVoice(client: Client, channelId: string): Promise<stri
     return guildId
   }
   if (existing) {
-    existing.connection.destroy()
-    states.delete(guildId)
+    // Switching channels within the guild: tear the old state down completely
+    // (timer + STT + children) before replacing it. We hold the lock across
+    // this, so don't release it here.
+    teardownState(existing)
   }
 
   const connection = joinVoiceChannel({
@@ -361,12 +363,7 @@ export function leaveVoice(guildId?: string): string {
   }
   const s = states.get(target)
   if (!s) return `not connected in guild ${target}`
-  clearPresenceCheck(s)
-  killSTTSessions(s)
-  killChildren(s)
-  try { s.player.stop(true) } catch {}
-  try { s.connection.destroy() } catch {}
-  states.delete(target)
+  teardownState(s)
   releaseLock(target)
   logVoice(`left voice in guild ${target}`)
   return `left voice in guild ${target}`
@@ -397,6 +394,27 @@ function clearPresenceCheck(s: GuildVoiceState): void {
     clearInterval(s.presenceCheck)
     s.presenceCheck = null
   }
+}
+
+/**
+ * Fully tear a guild's voice state down: stop the presence timer, STT sessions,
+ * spawned children and audio, destroy the connection, and drop it from the
+ * registry. Does NOT release the lockfile — callers that relinquish the guild
+ * (leaveVoice, the disconnect handler) release it explicitly, while a
+ * channel-switch keeps the lock and re-uses it for the new connection.
+ *
+ * Centralising teardown here is what stops leaked presence-check intervals: the
+ * channel-switch path used to destroy the connection and delete the map entry
+ * without clearing the interval, so orphaned timers kept firing and auto-"left"
+ * freshly-joined channels.
+ */
+function teardownState(s: GuildVoiceState): void {
+  clearPresenceCheck(s)
+  killSTTSessions(s)
+  killChildren(s)
+  try { s.player.stop(true) } catch {}
+  try { s.connection.destroy() } catch {}
+  states.delete(s.guildId)
 }
 
 /** Idle-auto-leave threshold: 5 minutes alone in voice channel. */
