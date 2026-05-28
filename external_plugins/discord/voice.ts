@@ -340,14 +340,24 @@ export async function joinVoice(client: Client, channelId: string): Promise<stri
         entersState(connection, VoiceConnectionStatus.Signalling, 5_000),
         entersState(connection, VoiceConnectionStatus.Connecting, 5_000),
       ])
-      // re-connecting on its own
+      // The connection is re-establishing itself (e.g. a voice region change) —
+      // let it recover on its own.
     } catch {
-      logVoice(`voice disconnected in guild ${guildId}, destroying`)
-      clearPresenceCheck(state)
-      killSTTSessions(state)
-      try { connection.destroy() } catch {}
-      states.delete(guildId)
+      // A real drop (gateway close / timeout). Tear the dead state down and try
+      // to rejoin the same channel once, so a transient disconnect doesn't leave
+      // the bot silently out of voice until someone notices. joinVoice
+      // re-acquires the lock and rebuilds the player/STT/presence wiring; if it
+      // throws (channel gone, perms revoked, persistent network failure) we stay
+      // out rather than hot-looping — the 15s ready-timeout paces any retry.
+      logVoice(`voice disconnected in guild ${guildId}; attempting rejoin to ${channelId}`)
+      teardownState(state)
       releaseLock(guildId)
+      try {
+        await joinVoice(client, channelId)
+        logVoice(`voice auto-rejoin to ${channelId} succeeded`)
+      } catch (err) {
+        logVoice(`voice auto-rejoin to ${channelId} failed: ${err instanceof Error ? err.message : err}`)
+      }
     }
   })
 
