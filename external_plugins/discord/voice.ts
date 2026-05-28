@@ -92,9 +92,11 @@ type GuildVoiceState = {
 const states = new Map<string, GuildVoiceState>()
 
 /** Cap on simultaneous open Deepgram ws across all guilds.
- *  Per the migration plan: 4 ppl talking = 4 ws is fine and cheap; cap protects
- *  against pathological cases (e.g. a 20-person stage channel all unmuted). */
-const MAX_CONCURRENT_STT = 6
+ *  Bumped 6→12 (2026-05-28): in a busy 5-6 person voice channel all 6 slots
+ *  filled with crosstalk and a direct "burg" address lost the race and got
+ *  dropped. 12 streams is still cheap (~$0.0043/min each) and well within the
+ *  Deepgram key's concurrency limit; cap still guards pathological cases. */
+const MAX_CONCURRENT_STT = 12
 
 export type TTSFailure = { guildId: string; channelId: string; reason: string; text: string }
 
