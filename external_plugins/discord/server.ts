@@ -42,6 +42,7 @@ import {
   logUtterance,
 } from './voice'
 import { dailyCapUsd } from './stt'
+import { setupPresenceTracking } from './presence'
 import { randomBytes } from 'crypto'
 import { readFileSync, writeFileSync, appendFileSync, mkdirSync, readdirSync, rmSync, statSync, renameSync, realpathSync, chmodSync } from 'fs'
 import { homedir } from 'os'
@@ -102,6 +103,11 @@ const client = new Client({
     // in phase 2. Adding both now so we don't have to reconnect later.
     GatewayIntentBits.GuildVoiceStates,
     GatewayIntentBits.GuildMembers,
+    // GuildPresences is privileged — must be toggled in the Discord dev portal.
+    // Gated on env so the bot still boots if the portal toggle is off.
+    ...(process.env.ENABLE_PRESENCE_TRACKING === '1'
+      ? [GatewayIntentBits.GuildPresences]
+      : []),
   ],
   // DMs arrive as partial channels — messageCreate never fires without this.
   partials: [Partials.Channel],
@@ -1296,6 +1302,10 @@ async function buildReplyMeta(msg: Message): Promise<Record<string, string>> {
 client.once('ready', c => {
   process.stderr.write(`discord channel: gateway connected as ${c.user.tag}\n`)
 })
+
+if (process.env.ENABLE_PRESENCE_TRACKING === '1') {
+  setupPresenceTracking(client)
+}
 
 client.login(TOKEN).catch(err => {
   process.stderr.write(`discord channel: login failed: ${err}\n`)
