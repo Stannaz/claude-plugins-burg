@@ -211,7 +211,7 @@ function buildDeepgramUrl(): string {
   })
   // Keyterm prompting (nova-3): boost the bot's own wake words so they're reliably
   // transcribed and the `\bburg\b` wake gate actually fires. Repeatable param.
-  for (const term of ['burg', 'burger', 'bot']) params.append('keyterm', term)
+  for (const term of ['burg', 'burger', 'bot', 'stan', 'stannaz', 'noci', 'hond']) params.append('keyterm', term)
   return `${DEEPGRAM_LIVE_URL}?${params.toString()}`
 }
 
