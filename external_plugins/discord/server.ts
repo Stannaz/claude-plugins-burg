@@ -934,7 +934,7 @@ setVoiceCallbacks({
           reason,
           guild_id: guildId,
           channel_id: channelId,
-          text_preview: text.slice(0, 200),
+          text_preview: truncCodePoints(text, 200),
           ts: new Date().toISOString(),
         },
       },
@@ -1264,6 +1264,16 @@ async function handleInbound(msg: Message): Promise<void> {
 
 const REPLY_PREVIEW_MAX = 80
 
+// Truncate by code point, not UTF-16 code unit, so a multi-unit emoji's surrogate
+// pair is never split. A lone half-surrogate is invalid UTF-16 and crashes JSON
+// serialisation of the host context ("no low surrogate in string") → API 400,
+// bricking the request. Shared by every length-capped field that goes upstream
+// (reply preview, tts_failed text_preview) so the sites can't silently drift.
+function truncCodePoints(s: string, max: number): string {
+  const cps = Array.from(s)
+  return cps.length > max ? cps.slice(0, max).join('') : s
+}
+
 // Compact a parent-message body into a single-line preview suitable for the
 // <channel> tag. Empty bodies fall back to an attachment hint.
 function buildReplyPreview(text: string, attachments: Attachment[]): string {
@@ -1275,7 +1285,7 @@ function buildReplyPreview(text: string, attachments: Attachment[]): string {
     // JSON serialisation of the host context — "no low surrogate in string"
     // → API 400, which bricks the whole request.
     const cps = Array.from(flat)
-    return cps.length > REPLY_PREVIEW_MAX ? cps.slice(0, REPLY_PREVIEW_MAX - 1).join('') + '…' : flat
+    return cps.length > REPLY_PREVIEW_MAX ? truncCodePoints(flat, REPLY_PREVIEW_MAX - 1) + '…' : flat
   }
   if (attachments.length > 0) {
     const first = safeAttName(attachments[0]!)
