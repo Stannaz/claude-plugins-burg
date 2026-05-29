@@ -334,12 +334,19 @@ export async function joinVoice(client: Client, channelId: string): Promise<stri
       // The connection is re-establishing itself (e.g. a voice region change) —
       // let it recover on its own.
     } catch {
+      // Bail unless this is still the live connection for the guild. During the
+      // 5s race above the user may have left (leaveVoice deleted this state) or
+      // switched channels (a fresh joinVoice replaced it in `states`). The
+      // Disconnected closure captured a now-stale `state`; acting on it would
+      // zombie-rejoin a channel the user left, or teardownState would delete the
+      // NEW connection's state (keyed on guildId) and drag us back to the old one.
+      if (states.get(guildId) !== state) return
       // A real drop (gateway close / timeout). Tear the dead state down and try
       // to rejoin the same channel once, so a transient disconnect doesn't leave
       // the bot silently out of voice until someone notices. joinVoice
       // re-acquires the lock and rebuilds the player/STT/presence wiring; if it
       // throws (channel gone, perms revoked, persistent network failure) we stay
-      // out rather than hot-looping — the 15s ready-timeout paces any retry.
+      // out rather than hot-looping.
       logVoice(`voice disconnected in guild ${guildId}; attempting rejoin to ${channelId}`)
       teardownState(state)
       releaseLock(guildId)
@@ -717,7 +724,11 @@ function measureLoudness(s: GuildVoiceState, path: string): Promise<number | nul
     let proc: ChildProcess
     try {
       proc = spawn('ffmpeg', [
-        '-hide_banner', '-i', path,
+        // -t 60: analyse only the first 60s of input. One integrated-loudness
+        // reading for a single static gain doesn't need the whole file, and
+        // decoding it all blocked the playback queue for 6-55s of dead air per
+        // track (worst on long mixes). Caps head latency to ~1-2s.
+        '-hide_banner', '-t', '60', '-i', path,
         '-af', `loudnorm=I=${TARGET_LUFS}:TP=-1.5:LRA=11:print_format=json`,
         '-f', 'null', '-',
       ], { stdio: ['ignore', 'ignore', 'pipe'] })
