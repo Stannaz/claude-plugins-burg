@@ -55,7 +55,7 @@ function recordSessionDuration(seconds: number): void {
   dailySpend.spendUsd += (seconds / 60) * DEEPGRAM_USD_PER_MIN
 }
 
-export function dailySpendUsd(): number {
+function dailySpendUsd(): number {
   rolloverIfNewDay()
   return dailySpend.spendUsd
 }
