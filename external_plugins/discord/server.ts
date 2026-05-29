@@ -1269,7 +1269,13 @@ const REPLY_PREVIEW_MAX = 80
 function buildReplyPreview(text: string, attachments: Attachment[]): string {
   const flat = text.replace(/\s+/g, ' ').trim()
   if (flat) {
-    return flat.length > REPLY_PREVIEW_MAX ? flat.slice(0, REPLY_PREVIEW_MAX - 1) + '…' : flat
+    // Slice by code points, not UTF-16 code units: Array.from() keeps each
+    // emoji's surrogate pair (e.g. 💀) as a single element, so the cut can
+    // never land mid-pair. A lone half-surrogate is invalid UTF-16 and crashes
+    // JSON serialisation of the host context — "no low surrogate in string"
+    // → API 400, which bricks the whole request.
+    const cps = Array.from(flat)
+    return cps.length > REPLY_PREVIEW_MAX ? cps.slice(0, REPLY_PREVIEW_MAX - 1).join('') + '…' : flat
   }
   if (attachments.length > 0) {
     const first = safeAttName(attachments[0]!)
