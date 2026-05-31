@@ -40,6 +40,7 @@ import {
   shutdownVoice,
   isLikelyBotEcho,
   logUtterance,
+  registerVoiceAutoLeave,
 } from './voice'
 import { dailyCapUsd } from './stt'
 import { setupPresenceTracking } from './presence'
@@ -1109,6 +1110,10 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
     channelLog('alia-join.log', `FAILED for ${who} in ${newState.channelId}: ${err}`)
   }
 })
+
+// burg fork: leave a voice channel 30s after the last non-bot human leaves it
+// (grace resets if anyone rejoins). Own voiceStateUpdate listener inside voice.ts.
+registerVoiceAutoLeave(client)
 
 // Button-click handler for permission requests. customId is
 // `perm:allow:<id>`, `perm:deny:<id>`, or `perm:more:<id>`.

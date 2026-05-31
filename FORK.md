@@ -23,6 +23,10 @@ A new tool, `fetch_message(chat_id, message_id)`, returns one specific message i
 `voice.ts` routes **both** TTS (edge-tts) and music (`voice_play` files) through a single ffmpeg `loudnorm` pass (`LOUDNORM_FILTER`, EBU R128, `I=-16` LUFS) and hands the resulting raw PCM to `@discordjs/voice` as `StreamType.Raw`. Without it, edge-tts (~-21 LUFS) is much quieter than mastered tracks (~-15 LUFS), so listeners had to ride the volume knob between my voice and songs. One-pass (not two-pass) loudnorm: it drains the pipe far faster than realtime, so it adds no audible startup delay, trading ~2 LU of accuracy on music — fine for live-queued audio. **To change the bot's overall level or the matching target, edit `LOUDNORM_FILTER` in `voice.ts` — it's the single knob.**
 
 
+### `external_plugins/discord` — leave voice when alone
+
+`voice.ts` exports `registerVoiceAutoLeave(client)` (called once from `server.ts`, right after the Ali-A `voiceStateUpdate` handler). It attaches its own `voiceStateUpdate` listener: whenever the bot is connected to a voice channel in a guild and that channel drops to **zero non-bot humans**, it arms a single 30s timer (`EMPTY_LEAVE_GRACE_MS`) and disconnects when it fires — unless someone (re)joins first, which cancels it. The countdown is re-evaluated on every voice-state change and re-checked at fire time, so a late rejoin always aborts the leave. `evaluateEmptyLeave` is also called at the end of `joinVoice`, so joining an *already-empty* channel starts the same countdown rather than sitting there forever. Timer state is a per-guild `emptyLeaveTimer` field on `GuildVoiceState`, cleared in `teardownState`. **Note:** this means the bot won't persist alone in an empty channel (e.g. a "radio" left running after everyone leaves) — it'll drop after 30s. Requested by hond + stannaz 2026-05-31.
+
 ## Logs — where to look when something breaks
 
 Read this *before* grepping the filesystem.

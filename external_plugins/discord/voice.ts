@@ -87,6 +87,9 @@ type GuildVoiceState = {
   /** True once a budget_exceeded inbound was emitted today, so we don't
    *  spam the main session with repeats. */
   budgetEventSent: boolean
+  /** Pending "leave when alone" timer. Armed when the channel drops to zero
+   *  non-bot humans; cleared if anyone (re)joins before it fires. */
+  emptyLeaveTimer: ReturnType<typeof setTimeout> | null
 }
 
 const states = new Map<string, GuildVoiceState>()
@@ -291,6 +294,7 @@ export async function joinVoice(client: Client, channelId: string): Promise<stri
     pcmMutedUntil: 0,
     ttsActive: false,
     budgetEventSent: false,
+    emptyLeaveTimer: null,
   }
   states.set(guildId, state)
   wireSTT(client, state)
@@ -360,6 +364,10 @@ export async function joinVoice(client: Client, channelId: string): Promise<stri
   })
 
   logVoice(`joined voice channel ${channelId} in guild ${guildId}`)
+  // Arm the alone-check immediately: if we joined an empty channel (or everyone
+  // bar us is a bot), start the leave countdown now rather than waiting for the
+  // next voice-state change that might never come.
+  evaluateEmptyLeave(client, guildId)
   return guildId
 }
 
@@ -381,6 +389,71 @@ export function leaveAll(): void {
   for (const guildId of [...states.keys()]) {
     try { leaveVoice(guildId) } catch {}
   }
+}
+
+/** Grace period before the bot leaves a channel it's alone in. Reset by anyone
+ *  (re)joining within the window. */
+const EMPTY_LEAVE_GRACE_MS = 30_000
+
+/** Count non-bot members currently in `channelId` per discord.js's voice-state
+ *  cache. Returns null if the channel isn't cached / isn't a voice channel, so
+ *  the caller can't (mis)decide it's empty from a cache miss. */
+function countHumansInChannel(client: Client, channelId: string): number | null {
+  const ch = client.channels.cache.get(channelId)
+  if (!ch || !ch.isVoiceBased()) return null
+  let n = 0
+  for (const m of ch.members.values()) if (!m.user.bot) n++
+  return n
+}
+
+/**
+ * Re-evaluate whether the bot should stay in its channel for `guildId`. If the
+ * channel has any non-bot human, cancel any pending leave. If it's empty, arm a
+ * single EMPTY_LEAVE_GRACE_MS timer; when it fires we re-check occupancy (so a
+ * late (re)join aborts the leave) and disconnect if still empty. Idempotent —
+ * safe to call on every voiceStateUpdate and right after a join.
+ */
+function evaluateEmptyLeave(client: Client, guildId: string): void {
+  const s = states.get(guildId)
+  if (!s) return
+  const humans = countHumansInChannel(client, s.channelId)
+  if (humans === null) return // cache miss — don't act on incomplete info
+  if (humans > 0) {
+    if (s.emptyLeaveTimer) {
+      clearTimeout(s.emptyLeaveTimer)
+      s.emptyLeaveTimer = null
+    }
+    return
+  }
+  if (s.emptyLeaveTimer) return // already counting down
+  logVoice(`auto-leave: guild ${guildId} channel ${s.channelId} now empty; ${EMPTY_LEAVE_GRACE_MS}ms grace started`)
+  s.emptyLeaveTimer = setTimeout(() => {
+    const cur = states.get(guildId)
+    if (!cur) return
+    cur.emptyLeaveTimer = null
+    const h = countHumansInChannel(client, cur.channelId)
+    if (h && h > 0) return // someone (re)joined during the grace — stay
+    logVoice(`auto-leave: guild ${guildId} channel ${cur.channelId} empty for ${EMPTY_LEAVE_GRACE_MS}ms; leaving`)
+    try {
+      leaveVoice(guildId)
+    } catch (err) {
+      logVoice(`auto-leave: leaveVoice failed for guild ${guildId}: ${err instanceof Error ? err.message : err}`)
+    }
+  }, EMPTY_LEAVE_GRACE_MS)
+}
+
+/**
+ * Wire the "leave when alone" behaviour: on any voice-state change in a guild
+ * we're connected to, re-evaluate occupancy of our channel and leave 30s after
+ * the last non-bot human departs (timer resets if anyone rejoins). Registered
+ * once at startup from server.ts.
+ */
+export function registerVoiceAutoLeave(client: Client): void {
+  client.on('voiceStateUpdate', (oldState, newState) => {
+    const guildId = newState.guild?.id ?? oldState.guild?.id
+    if (!guildId || !states.has(guildId)) return
+    evaluateEmptyLeave(client, guildId)
+  })
 }
 
 function killChildren(s: GuildVoiceState): void {
@@ -405,6 +478,10 @@ function killSTTSessions(s: GuildVoiceState): void {
  * re-uses it for the new connection.
  */
 function teardownState(s: GuildVoiceState): void {
+  if (s.emptyLeaveTimer) {
+    clearTimeout(s.emptyLeaveTimer)
+    s.emptyLeaveTimer = null
+  }
   killSTTSessions(s)
   killChildren(s)
   try { s.player.stop(true) } catch {}
