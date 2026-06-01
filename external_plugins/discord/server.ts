@@ -582,6 +582,18 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
       },
     },
     {
+      name: 'ignore',
+      description: 'Consciously dismiss an inbound Discord message without replying or reacting. Marks it as handled for the reply-coverage guard with NO visible effect in the channel (unlike react, which leaves an emoji). Use for filler / side-chatter you deliberately choose not to answer.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          chat_id: { type: 'string' },
+          message_id: { type: 'string' },
+        },
+        required: ['chat_id', 'message_id'],
+      },
+    },
+    {
       name: 'edit_message',
       description: 'Edit a message the bot previously sent. Useful for interim progress updates. Edits don\'t trigger push notifications — send a new reply when a long task completes so the user\'s device pings.',
       inputSchema: {
@@ -797,6 +809,14 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         const msg = await ch.messages.fetch(args.message_id as string)
         await msg.react(args.emoji as string)
         return { content: [{ type: 'text', text: 'reacted' }] }
+      }
+      case 'ignore': {
+        // No-op on Discord by design. Validates the channel is reachable/allowed,
+        // then returns. Its only purpose is to leave a tool_use in the transcript
+        // so the reply-coverage guard counts the message as consciously handled —
+        // without posting anything visible in the channel (unlike react).
+        await fetchAllowedChannel(args.chat_id as string)
+        return { content: [{ type: 'text', text: `ignored (id: ${args.message_id as string})` }] }
       }
       case 'edit_message': {
         const ch = await fetchAllowedChannel(args.chat_id as string)
