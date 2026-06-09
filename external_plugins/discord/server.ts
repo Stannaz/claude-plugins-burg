@@ -462,6 +462,24 @@ function safeAttName(att: Attachment): string {
   return (att.name ?? att.id).replace(/[\[\]\r\n;]/g, '_')
 }
 
+// Timestamps surfaced to the model (inbound meta, history renders) are
+// Europe/London wall-clock with the UTC offset kept, so they stay unambiguous
+// across DST. Internal log files remain UTC.
+const LONDON_TS_FMT = new Intl.DateTimeFormat('sv-SE', {
+  timeZone: 'Europe/London',
+  year: 'numeric', month: '2-digit', day: '2-digit',
+  hour: '2-digit', minute: '2-digit', second: '2-digit',
+  hourCycle: 'h23', timeZoneName: 'longOffset',
+})
+function londonTs(d: Date): string {
+  // sv-SE + longOffset: "2026-06-09 20:45:13 GMT+01:00" → "2026-06-09T20:45:13+01:00".
+  // In winter longOffset renders UTC as bare "GMT" (no digits) — normalize to +00:00.
+  const s = LONDON_TS_FMT.format(d).replace(' ', 'T')
+  return s.endsWith('TGMT') || s.endsWith(' GMT')
+    ? s.replace(/[T ]GMT$/, '') + '+00:00'
+    : s.replace(' GMT', '')
+}
+
 const mcp = new Server(
   { name: 'discord', version: '1.0.0' },
   {
@@ -799,7 +817,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
                   // messages in an opted-in channel never hit the gate but
                   // still live in channel history).
                   const text = m.content.replace(/[\r\n]+/g, ' ⏎ ')
-                  return `[${m.createdAt.toISOString()}] ${who}: ${text}  (id: ${m.id}${atts})`
+                  return `[${londonTs(m.createdAt)}] ${who}: ${text}  (id: ${m.id}${atts})`
                 })
                 .join('\n')
         return { content: [{ type: 'text', text: out }] }
@@ -834,7 +852,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
           const kb = (att.size / 1024).toFixed(0)
           atts.push(`  - ${safeAttName(att)} (${att.contentType ?? 'unknown'}, ${kb}KB, id: ${att.id})`)
         }
-        const head = `[${msg.createdAt.toISOString()}] ${who} (id: ${msg.id})`
+        const head = `[${londonTs(msg.createdAt)}] ${who} (id: ${msg.id})`
         const body = msg.content || '(no text)'
         const out = atts.length > 0 ? `${head}\n${body}\nattachments:\n${atts.join('\n')}` : `${head}\n${body}`
         return { content: [{ type: 'text', text: out }] }
@@ -956,7 +974,7 @@ setVoiceCallbacks({
           guild_id: guildId,
           channel_id: channelId,
           text_preview: truncCodePoints(text, 200),
-          ts: new Date().toISOString(),
+          ts: londonTs(new Date()),
         },
       },
     }).catch(err => {
@@ -994,7 +1012,7 @@ setVoiceCallbacks({
           guild_id: r.guildId,
           user: username,
           user_id: r.userId,
-          ts: new Date().toISOString(),
+          ts: londonTs(new Date()),
           confidence: r.confidence.toFixed(3),
           latency_ms: String(r.latencyMs),
         },
@@ -1023,7 +1041,7 @@ setVoiceCallbacks({
           budget_exceeded: 'true',
           channel_id: channelId,
           guild_id: guildId,
-          ts: new Date().toISOString(),
+          ts: londonTs(new Date()),
         },
       },
     }).catch(err => {
@@ -1043,7 +1061,7 @@ setVoiceCallbacks({
           source: 'voice',
           deepgram_unavailable: 'true',
           reason,
-          ts: new Date().toISOString(),
+          ts: londonTs(new Date()),
         },
       },
     }).catch(err => {
@@ -1058,7 +1076,7 @@ setVoiceCallbacks({
         meta: {
           source: 'voice',
           deepgram_recovered: 'true',
-          ts: new Date().toISOString(),
+          ts: londonTs(new Date()),
         },
       },
     }).catch(err => {
@@ -1277,7 +1295,7 @@ async function handleInbound(msg: Message): Promise<void> {
         message_id: msg.id,
         user: msg.author.username,
         user_id: msg.author.id,
-        ts: msg.createdAt.toISOString(),
+        ts: londonTs(msg.createdAt),
         ...(atts.length > 0 ? { attachment_count: String(atts.length), attachments: atts.join('; ') } : {}),
         ...replyMeta,
       },
