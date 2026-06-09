@@ -96,14 +96,13 @@ const states = new Map<string, GuildVoiceState>()
 
 // Auto-rejoin flap damping. Every successful joinVoice records joinedAt; a
 // Disconnected-triggered rejoin counts as a flap unless the connection had
-// been up for REJOIN_STABLE_MS. Flaps back off exponentially and give up at
-// REJOIN_MAX_ATTEMPTS (entry cleared so a later manual voice_join starts
-// fresh). Without this a flapping voice region cycles teardown→rejoin
-// forever with no backoff.
-const REJOIN_BASE_DELAY_MS = 5_000
-const REJOIN_MAX_DELAY_MS = 5 * 60_000
+// been up for REJOIN_STABLE_MS. The first flap rejoin is immediate, then
+// retries back off linearly 1s, 2s, … 10s and give up (entry cleared so a
+// later manual voice_join starts fresh). Without this a flapping voice
+// region cycles teardown→rejoin forever with no backoff.
+const REJOIN_BACKOFF_STEP_MS = 1_000
 const REJOIN_STABLE_MS = 60_000
-const REJOIN_MAX_ATTEMPTS = 6
+const REJOIN_MAX_ATTEMPTS = 11 // 1 immediate + 10 backed-off retries
 const rejoinFlap = new Map<string, { attempts: number; joinedAt: number }>()
 
 /** Cap on simultaneous open Deepgram ws across all guilds.
@@ -377,9 +376,7 @@ export async function joinVoice(client: Client, channelId: string): Promise<stri
         logVoice(`voice flapping in guild ${guildId}: giving up auto-rejoin after ${REJOIN_MAX_ATTEMPTS} attempts`)
         return
       }
-      const delay = flap.attempts === 1
-        ? 0
-        : Math.min(REJOIN_BASE_DELAY_MS * 2 ** (flap.attempts - 2), REJOIN_MAX_DELAY_MS)
+      const delay = (flap.attempts - 1) * REJOIN_BACKOFF_STEP_MS
       logVoice(`voice disconnected in guild ${guildId}; rejoin to ${channelId} in ${delay}ms (attempt ${flap.attempts}/${REJOIN_MAX_ATTEMPTS})`)
       if (delay > 0) {
         await new Promise(res => setTimeout(res, delay))
