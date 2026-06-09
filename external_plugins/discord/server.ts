@@ -959,6 +959,11 @@ function voiceWho(guildId?: string): string {
   return lines.join('\n')
 }
 
+// Wake gate for VC transcripts: "burg" / "burger(s)" anywhere in the
+// utterance. Deepgram keyterm prompting (stt.ts) boosts these so they're
+// reliably transcribed even in noisy audio.
+const VOICE_WAKE_RE = /\bburg(ers?)?\b/i
+
 setVoiceCallbacks({
   // edge-tts errors surface as a one-shot <voice tts_failed=true> inbound so
   // the main session knows the spoken reply didn't go out.
@@ -982,11 +987,13 @@ setVoiceCallbacks({
     })
   },
 
-  // Finalised transcripts from Deepgram are forwarded as <voice> inbounds
-  // unconditionally — the bot listens to everything in VC and decides
-  // whether to reply itself. Echo-guard still applies (don't loop on our
-  // own TTS). Every transcript is TSV-logged so "why didn't u respond"
-  // debugging is one Read away.
+  // Finalised transcripts from Deepgram are gated on the wake word: only
+  // utterances containing "burg"/"burger" reach the main session as <voice>
+  // inbounds — everything else is TSV-logged and dropped here so idle VC
+  // chatter never lands in context (stannaz 2026-06-09). Echo-guard runs
+  // first (don't loop on our own TTS, which says "burg" constantly). Every
+  // transcript is still TSV-logged so "why didn't u respond" debugging is
+  // one Read away.
   onTranscript: async r => {
     const username = await resolveUsername(r.userId)
     if (isLikelyBotEcho(r.text, r.guildId)) {
@@ -994,6 +1001,14 @@ setVoiceCallbacks({
         speakerId: r.userId, speakerName: username, direction: 'in',
         text: r.text, confidence: r.confidence, latencyMs: r.latencyMs,
         gateDecision: 'skipped_echo_match',
+      })
+      return
+    }
+    if (!VOICE_WAKE_RE.test(r.text)) {
+      logUtterance({
+        speakerId: r.userId, speakerName: username, direction: 'in',
+        text: r.text, confidence: r.confidence, latencyMs: r.latencyMs,
+        gateDecision: 'skipped_no_wake_word',
       })
       return
     }
