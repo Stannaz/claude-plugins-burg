@@ -14,7 +14,7 @@ All timestamps surfaced **to the model** are Europe/London wall-clock with the U
 
 ### `external_plugins/discord` — auto-rejoin flap damping
 
-The voice `Disconnected` handler's auto-rejoin is rate-limited (`rejoinFlap` in `voice.ts`): a connection that was up ≥60s rejoins immediately as before, but repeated drops within the stable window back off exponentially (5s → 10s → … capped 5min) and give up after 6 attempts (map entry cleared so a later manual `voice_join` starts fresh). A manual `voice_join` during the backoff sleep supersedes the pending auto-rejoin. Fixes the unbounded teardown→rejoin cycle a flapping voice region could cause (review finding, 2026-06-09).
+The voice `Disconnected` handler's auto-rejoin is rate-limited (`rejoinFlap` in `voice.ts`): a connection that was up ≥60s rejoins immediately as before, but repeated drops within the stable window back off linearly (1s → 2s → … → 10s) and then give up (map entry cleared so a later manual `voice_join` starts fresh). A manual `voice_join` during the backoff sleep supersedes the pending auto-rejoin. Fixes the unbounded teardown→rejoin cycle a flapping voice region could cause (review finding, 2026-06-09; schedule per stannaz).
 
 ### `external_plugins/discord` — reply context
 
