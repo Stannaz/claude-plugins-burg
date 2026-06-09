@@ -8,6 +8,10 @@ Most of this marketplace is upstream-as-is. The fork is here so we can extend sp
 
 ## Custom additions
 
+### `external_plugins/discord` — London-time timestamps
+
+All timestamps surfaced **to the model** are Europe/London wall-clock with the UTC offset kept (`2026-06-09T20:45:13+01:00`, `+00:00` in winter), via `londonTs()` in `server.ts`. Covers the inbound `<channel>` meta `ts`, the five voice-event metas, and the `fetch_message`/`fetch_messages` history renders. Internal log files (channel log, voice utterance log) stay UTC. The offset is kept deliberately so the strings remain unambiguous, machine-parseable ISO-8601 across DST. Requested by stannaz 2026-06-09.
+
 ### `external_plugins/discord` — reply context
 
 Inbound messages now carry their reply target. When a Discord user replies to an earlier message, the `<channel>` notification gains three extra meta fields:
