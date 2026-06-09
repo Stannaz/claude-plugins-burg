@@ -12,6 +12,10 @@ Most of this marketplace is upstream-as-is. The fork is here so we can extend sp
 
 All timestamps surfaced **to the model** are Europe/London wall-clock with the UTC offset kept (`2026-06-09T20:45:13+01:00`, `+00:00` in winter), via `londonTs()` in `server.ts`. Covers the inbound `<channel>` meta `ts`, the five voice-event metas, and the `fetch_message`/`fetch_messages` history renders. Internal log files (channel log, voice utterance log) stay UTC. The offset is kept deliberately so the strings remain unambiguous, machine-parseable ISO-8601 across DST. Requested by stannaz 2026-06-09.
 
+### `external_plugins/discord` — auto-rejoin flap damping
+
+The voice `Disconnected` handler's auto-rejoin is rate-limited (`rejoinFlap` in `voice.ts`): a connection that was up ≥60s rejoins immediately as before, but repeated drops within the stable window back off exponentially (5s → 10s → … capped 5min) and give up after 6 attempts (map entry cleared so a later manual `voice_join` starts fresh). A manual `voice_join` during the backoff sleep supersedes the pending auto-rejoin. Fixes the unbounded teardown→rejoin cycle a flapping voice region could cause (review finding, 2026-06-09).
+
 ### `external_plugins/discord` — reply context
 
 Inbound messages now carry their reply target. When a Discord user replies to an earlier message, the `<channel>` notification gains three extra meta fields:
