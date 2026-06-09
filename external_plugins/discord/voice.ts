@@ -143,6 +143,7 @@ export type GateDecision =
   | 'forwarded'
   | 'skipped_cooldown'
   | 'skipped_echo_match'
+  | 'skipped_no_wake_word'
   | 'skipped_budget'
   | 'played_file'
   | 'tts_failed'
