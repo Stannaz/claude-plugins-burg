@@ -1137,15 +1137,16 @@ function channelLog(file: string, line: string): void {
   } catch {}
 }
 
-// --- TEMPORARY: Ali-A intro on VC join (burg fork) --------------------------
-// noci requested 2026-05-27, stannaz-approved for 15 days. Blasts an obnoxious
-// intro sting whenever a user joins a voice channel in the one guild below.
-// SELF-EXPIRES at the timestamp below (midnight Europe/London, 12 Jun 2026) —
-// after that the handler no-ops. Scheduled for removal after expiry; see memory
-// alia-join-cleanup.
-const ALIA_JOIN_EXPIRY = Date.parse('2026-06-12T00:00:00+01:00')
+// --- TEMPORARY: Bangarang intro on VC join (burg fork) -----------------------
+// Successor to the Ali-A intro gag (noci 2026-05-27). noci requested the swap to
+// Skrillex - Bangarang for 7 days on 2026-06-10 (he has full authority over the
+// intro feature per stannaz). Blasts the drop whenever a user joins a voice
+// channel in the one guild below. SELF-EXPIRES at the timestamp below (midnight
+// Europe/London, 18 Jun 2026) — after that the handler no-ops. Scheduled for
+// removal after expiry; see memory alia-join-cleanup.
+const ALIA_JOIN_EXPIRY = Date.parse('2026-06-18T00:00:00+01:00')
 const ALIA_GUILD_ID = '1119325622855008407' // only fires in this guild
-const ALIA_INTRO_PATH = join(import.meta.dir, 'assets', 'alia_intro.mp3')
+const ALIA_INTRO_PATH = join(import.meta.dir, 'assets', 'bangarang_intro.mp3')
 client.on('voiceStateUpdate', async (oldState, newState) => {
   if (Date.now() >= ALIA_JOIN_EXPIRY) return
   if (newState.guild?.id !== ALIA_GUILD_ID) return // scoped to a single guild
