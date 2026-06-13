@@ -366,6 +366,9 @@ export async function joinVoice(client: Client, channelId: string): Promise<stri
       // re-acquires the lock and rebuilds the player/STT/presence wiring; if it
       // throws (channel gone, perms revoked, persistent network failure) we stay
       // out rather than hot-looping.
+      // Rejoin the channel we were LAST in (state.channelId tracks admin
+      // drags), not the closure-captured original join target.
+      const rejoinChannelId = state.channelId
       teardownState(state)
       releaseLock(guildId)
       const flap = rejoinFlap.get(guildId) ?? { attempts: 0, joinedAt: 0 }
@@ -377,17 +380,17 @@ export async function joinVoice(client: Client, channelId: string): Promise<stri
         return
       }
       const delay = (flap.attempts - 1) * REJOIN_BACKOFF_STEP_MS
-      logVoice(`voice disconnected in guild ${guildId}; rejoin to ${channelId} in ${delay}ms (attempt ${flap.attempts}/${REJOIN_MAX_ATTEMPTS})`)
+      logVoice(`voice disconnected in guild ${guildId}; rejoin to ${rejoinChannelId} in ${delay}ms (attempt ${flap.attempts}/${REJOIN_MAX_ATTEMPTS})`)
       if (delay > 0) {
         await new Promise(res => setTimeout(res, delay))
         // A manual voice_join during the backoff supersedes the auto-rejoin.
         if (states.has(guildId)) return
       }
       try {
-        await joinVoice(client, channelId)
-        logVoice(`voice auto-rejoin to ${channelId} succeeded`)
+        await joinVoice(client, rejoinChannelId)
+        logVoice(`voice auto-rejoin to ${rejoinChannelId} succeeded`)
       } catch (err) {
-        logVoice(`voice auto-rejoin to ${channelId} failed: ${err instanceof Error ? err.message : err}`)
+        logVoice(`voice auto-rejoin to ${rejoinChannelId} failed: ${err instanceof Error ? err.message : err}`)
       }
     }
   })
@@ -481,6 +484,17 @@ export function registerVoiceAutoLeave(client: Client): void {
   client.on('voiceStateUpdate', (oldState, newState) => {
     const guildId = newState.guild?.id ?? oldState.guild?.id
     if (!guildId || !states.has(guildId)) return
+    // If WE moved channels (e.g. an admin drag), follow: re-point the tracked
+    // channel so occupancy checks — and any later auto-rejoin — target the
+    // channel we're actually in, not the one we originally joined. Without
+    // this, joining an empty channel and being dragged to a full one leaves
+    // the empty-leave timer watching the stale empty channel, and the bot
+    // self-evicts EMPTY_LEAVE_GRACE_MS after the join.
+    const s = states.get(guildId)!
+    if (newState.id === client.user?.id && newState.channelId && newState.channelId !== s.channelId) {
+      logVoice(`voice channel moved: ${s.channelId} -> ${newState.channelId} in guild ${guildId}`)
+      s.channelId = newState.channelId
+    }
     evaluateEmptyLeave(client, guildId)
   })
 }
