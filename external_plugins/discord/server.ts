@@ -1146,7 +1146,19 @@ function channelLog(file: string, line: string): void {
 // removal after expiry; see memory alia-join-cleanup.
 const ALIA_JOIN_EXPIRY = Date.parse('2026-06-18T00:00:00+01:00')
 const ALIA_GUILD_ID = '1119325622855008407' // only fires in this guild
-const ALIA_INTRO_PATH = join(import.meta.dir, 'assets', 'bangarang_intro.mp3')
+// burg fork: weighted-random join sting (noci-requested 2026-06-15, stannaz-ok) —
+// ~45% Bangarang, ~45% Newports clip, ~10% Ali-A intro, so joins are a surprise.
+const JOIN_STINGS: { path: string; weight: number }[] = [
+  { path: join(import.meta.dir, 'assets', 'bangarang_intro.mp3'), weight: 45 },
+  { path: join(import.meta.dir, 'assets', 'newports_join.mp3'), weight: 45 },
+  { path: join(import.meta.dir, 'assets', 'alia_intro.mp3'), weight: 10 },
+]
+function pickJoinSting(): { path: string; weight: number } {
+  const total = JOIN_STINGS.reduce((s, x) => s + x.weight, 0)
+  let r = Math.random() * total
+  for (const s of JOIN_STINGS) if ((r -= s.weight) < 0) return s
+  return JOIN_STINGS[0]
+}
 client.on('voiceStateUpdate', async (oldState, newState) => {
   if (Date.now() >= ALIA_JOIN_EXPIRY) return
   if (newState.guild?.id !== ALIA_GUILD_ID) return // scoped to a single guild
@@ -1157,8 +1169,9 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
   const who = newState.member?.user?.tag ?? newState.id
   try {
     await joinVoice(client, newState.channelId)
-    enqueueFile(ALIA_INTRO_PATH, newState.guild.id)
-    channelLog('alia-join.log', `joined ${newState.channelId} and queued intro for ${who} (guild ${newState.guild.id})`)
+    const sting = pickJoinSting()
+    enqueueFile(sting.path, newState.guild.id)
+    channelLog('alia-join.log', `joined ${newState.channelId} and queued ${sting.path.split('/').pop()} for ${who} (guild ${newState.guild.id})`)
   } catch (err) {
     process.stderr.write(`alia-join: failed to play intro: ${err}\n`)
     channelLog('alia-join.log', `FAILED for ${who} in ${newState.channelId}: ${err}`)
