@@ -1148,7 +1148,7 @@ const ALIA_JOIN_EXPIRY = Date.parse('2026-06-18T00:00:00+01:00')
 const ALIA_GUILD_ID = '1119325622855008407' // only fires in this guild
 // burg fork: weighted-random join sting (noci-requested 2026-06-15, stannaz-ok) —
 // ~45% Bangarang, ~45% Ali-A intro, ~10% Newports clip, so joins are a surprise.
-// (Bangarang + Ali-A assets are at 50% volume; Newports asset is at full volume.)
+// (Bangarang + Ali-A assets are at 20% volume; Newports asset is at full volume.)
 const JOIN_STINGS: { path: string; weight: number }[] = [
   { path: join(import.meta.dir, 'assets', 'bangarang_intro.mp3'), weight: 45 },
   { path: join(import.meta.dir, 'assets', 'alia_intro.mp3'), weight: 45 },
