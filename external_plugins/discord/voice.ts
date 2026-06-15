@@ -61,7 +61,7 @@ const TSV_HEADER = [
 const TTS_VOICE_DEFAULT = 'en-GB-RyanNeural'
 
 type QueueItem =
-  | { kind: 'file'; path: string }
+  | { kind: 'file'; path: string; gainDb?: number }
   | { kind: 'tts'; text: string; voice: string }
   | { kind: 'stream'; stream: Readable; inputType: StreamType }
 
@@ -667,9 +667,9 @@ function pickGuild(guildId?: string): GuildVoiceState {
   throw new Error('multiple guilds connected, specify guild_id')
 }
 
-export function enqueueFile(path: string, guildId?: string): void {
+export function enqueueFile(path: string, guildId?: string, gainDb?: number): void {
   const s = pickGuild(guildId)
-  s.queue.push({ kind: 'file', path })
+  s.queue.push({ kind: 'file', path, gainDb })
   void runQueue(s)
 }
 
@@ -773,7 +773,7 @@ async function runQueue(s: GuildVoiceState): Promise<void> {
   s.current = next
   try {
     if (next.kind === 'file') {
-      await playFileNow(s, next.path)
+      await playFileNow(s, next.path, next.gainDb)
     } else if (next.kind === 'tts') {
       await playTTSNow(s, next.text, next.voice)
     } else {
@@ -872,15 +872,18 @@ function measureLoudness(s: GuildVoiceState, path: string): Promise<number | nul
   })
 }
 
-async function playFileNow(s: GuildVoiceState, path: string): Promise<void> {
+async function playFileNow(s: GuildVoiceState, path: string, extraGainDb = 0): Promise<void> {
   // Two-pass: measure the whole file once, then apply ONE static gain so the
   // track plays at a constant level (no dynamic volume-riding within the song).
+  // extraGainDb is an optional per-item offset applied ON TOP of the normalised
+  // level — e.g. a join sting asking to play quieter than the target loudness.
+  // (Baking volume into the asset itself does nothing: loudnorm cancels it.)
   const measured = await measureLoudness(s, path)
   // If we were stopped / preempted while measuring, bail — current was cleared
   // or replaced. Stops a halted track springing back to life after the analysis.
   const cur = s.current
   if (!cur || cur.kind !== 'file' || cur.path !== path) return
-  const gainDb = measured != null ? TARGET_LUFS - measured : 0
+  const gainDb = (measured != null ? TARGET_LUFS - measured : 0) + extraGainDb
   const ff = spawnPcm(s, path, `volume=${gainDb.toFixed(2)}dB,${NORM_LIMITER}`)
   if (!ff.stdout) throw new Error('ffmpeg pcm: stdout pipe did not initialise')
   const resource = createAudioResource(ff.stdout, { inputType: StreamType.Raw })
