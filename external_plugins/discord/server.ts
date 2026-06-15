@@ -1148,13 +1148,15 @@ const ALIA_JOIN_EXPIRY = Date.parse('2026-06-18T00:00:00+01:00')
 const ALIA_GUILD_ID = '1119325622855008407' // only fires in this guild
 // burg fork: weighted-random join sting (noci-requested 2026-06-15, stannaz-ok) —
 // ~45% Bangarang, ~45% Ali-A intro, ~10% Newports clip, so joins are a surprise.
-// (Bangarang + Ali-A assets are at 20% volume; Newports asset is at full volume.)
-const JOIN_STINGS: { path: string; weight: number }[] = [
-  { path: join(import.meta.dir, 'assets', 'bangarang_intro.mp3'), weight: 45 },
-  { path: join(import.meta.dir, 'assets', 'alia_intro.mp3'), weight: 45 },
-  { path: join(import.meta.dir, 'assets', 'newports_join.mp3'), weight: 10 },
+// Volume is set per-sting via gainDb, an offset applied AFTER the voice player's
+// loudnorm (baking it into the asset does nothing — loudnorm cancels it). Bangarang
+// + Ali-A play at -14 dB (~20% volume); Newports plays at full target loudness.
+const JOIN_STINGS: { path: string; weight: number; gainDb: number }[] = [
+  { path: join(import.meta.dir, 'assets', 'bangarang_intro.mp3'), weight: 45, gainDb: -14 },
+  { path: join(import.meta.dir, 'assets', 'alia_intro.mp3'), weight: 45, gainDb: -14 },
+  { path: join(import.meta.dir, 'assets', 'newports_join.mp3'), weight: 10, gainDb: 0 },
 ]
-function pickJoinSting(): { path: string; weight: number } {
+function pickJoinSting(): { path: string; weight: number; gainDb: number } {
   const total = JOIN_STINGS.reduce((s, x) => s + x.weight, 0)
   let r = Math.random() * total
   for (const s of JOIN_STINGS) if ((r -= s.weight) < 0) return s
@@ -1171,7 +1173,7 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
   try {
     await joinVoice(client, newState.channelId)
     const sting = pickJoinSting()
-    enqueueFile(sting.path, newState.guild.id)
+    enqueueFile(sting.path, newState.guild.id, sting.gainDb)
     channelLog('alia-join.log', `joined ${newState.channelId} and queued ${sting.path.split('/').pop()} for ${who} (guild ${newState.guild.id})`)
   } catch (err) {
     process.stderr.write(`alia-join: failed to play intro: ${err}\n`)
