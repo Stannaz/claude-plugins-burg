@@ -1142,18 +1142,20 @@ function channelLog(file: string, line: string): void {
 // gag per stannaz). On a genuine voice-channel entry in the one guild below, roll
 // once across the weighted table and blast the picked clip. Weights ARE percent
 // chances and sum to 100, so every join plays something. noci's split (2026-06-18):
-// Bangarang 41.5 / Ali-A 41.5 / Newports 10 / Soda 5 / peptide gooner 2 — and his
-// standing rule: any FUTURE clip takes its % out of Bangarang/Ali-A, not silence.
+// Bangarang 41.45 / Ali-A 41.45 / Newports 10 / Soda 5 / peptide gooner 2 / gold-Scar
+// 0.1 — and his standing rule: any FUTURE clip takes its % out of Bangarang/Ali-A, not
+// silence (which is why those two are now 41.45 each, shaved 0.05 apiece for gold-Scar).
 // Volume via gainDb, an offset applied AFTER the voice player's loudnorm (baking it
 // into the asset does nothing — loudnorm cancels it). Per-clip levels set by stannaz
-// (% = 10^(dB/20)): Bangarang/Ali-A 20%, peptide 60%, Soda 80%, Newports 100%.
+// (% = 10^(dB/20)): Bangarang/Ali-A 20%, peptide 60%, Soda 80%, Newports/gold-Scar 100%.
 const JOIN_STING_GUILD_ID = '1119325622855008407' // only fires in this guild
 const JOIN_STINGS: { path: string; weight: number; gainDb: number }[] = [
-  { path: join(import.meta.dir, 'assets', 'bangarang_intro.mp3'), weight: 41.5, gainDb: -14 },  // ~20%
-  { path: join(import.meta.dir, 'assets', 'alia_intro.mp3'), weight: 41.5, gainDb: -14 },       // ~20%
+  { path: join(import.meta.dir, 'assets', 'bangarang_intro.mp3'), weight: 41.45, gainDb: -14 }, // ~20%
+  { path: join(import.meta.dir, 'assets', 'alia_intro.mp3'), weight: 41.45, gainDb: -14 },      // ~20%
   { path: join(import.meta.dir, 'assets', 'newports_join.mp3'), weight: 10, gainDb: 0 },         // 100%
   { path: join(import.meta.dir, 'assets', 'soda_join.mp3'), weight: 5, gainDb: -1.9 },           // ~80%
   { path: join(import.meta.dir, 'assets', 'peptide_gooner_join.mp3'), weight: 2, gainDb: -4.4 }, // ~60%
+  { path: join(import.meta.dir, 'assets', 'goldscar_join.mp3'), weight: 0.1, gainDb: 0 },        // 100%, 1-in-1000 jackpot (yt 9KpWPNVW8Dw)
 ]
 function pickJoinSting(): { path: string; weight: number; gainDb: number } {
   const total = JOIN_STINGS.reduce((s, x) => s + x.weight, 0)
