@@ -1137,33 +1137,45 @@ function channelLog(file: string, line: string): void {
   } catch {}
 }
 
-// --- Peptide gooner: 2% chance to play on VC join (burg fork) ----------------
-// noci-requested 2026-06-18 (he has full authority over the join-sound gag per
-// stannaz; stannaz greenlit this specific wiring). Replaces the now-expired
-// Bangarang/Ali-A/Newports join-sting rotation. On a genuine voice-channel entry
-// in the one guild below there's a 2% roll to blast a 6–45s cut of the "peptide
-// gooner" clip — so it's a rare surprise, not every join. Volume via gainDb, an
-// offset applied AFTER the voice player's loudnorm (baking it into the asset does
-// nothing — loudnorm cancels it). gainDb -8 ≈ ~40% to not blow eardrums out.
-const PEPTIDE_GUILD_ID = '1119325622855008407' // only fires in this guild
-const PEPTIDE_JOIN_CHANCE = 0.02 // 2% per join
-const PEPTIDE_JOIN_PATH = join(import.meta.dir, 'assets', 'peptide_gooner_join.mp3')
-const PEPTIDE_JOIN_GAINDB = -8
+// --- Weighted-random VC-join sting (burg fork) ------------------------------
+// noci-requested, stannaz-greenlit (noci has full authority over the join-sound
+// gag per stannaz). On a genuine voice-channel entry in the one guild below, roll
+// once across the weighted table and blast the picked clip. Weights ARE percent
+// chances and sum to 100, so every join plays something. noci's split (2026-06-18):
+// Bangarang 41.5 / Ali-A 41.5 / Newports 10 / Soda 5 / peptide gooner 2 — and his
+// standing rule: any FUTURE clip takes its % out of Bangarang/Ali-A, not silence.
+// Volume via gainDb, an offset applied AFTER the voice player's loudnorm (baking it
+// into the asset does nothing — loudnorm cancels it). Per-clip levels set by stannaz
+// (% = 10^(dB/20)): Bangarang/Ali-A 20%, peptide 60%, Soda 80%, Newports 100%.
+const JOIN_STING_GUILD_ID = '1119325622855008407' // only fires in this guild
+const JOIN_STINGS: { path: string; weight: number; gainDb: number }[] = [
+  { path: join(import.meta.dir, 'assets', 'bangarang_intro.mp3'), weight: 41.5, gainDb: -14 },  // ~20%
+  { path: join(import.meta.dir, 'assets', 'alia_intro.mp3'), weight: 41.5, gainDb: -14 },       // ~20%
+  { path: join(import.meta.dir, 'assets', 'newports_join.mp3'), weight: 10, gainDb: 0 },         // 100%
+  { path: join(import.meta.dir, 'assets', 'soda_join.mp3'), weight: 5, gainDb: -1.9 },           // ~80%
+  { path: join(import.meta.dir, 'assets', 'peptide_gooner_join.mp3'), weight: 2, gainDb: -4.4 }, // ~60%
+]
+function pickJoinSting(): { path: string; weight: number; gainDb: number } {
+  const total = JOIN_STINGS.reduce((s, x) => s + x.weight, 0)
+  let r = Math.random() * total
+  for (const s of JOIN_STINGS) if ((r -= s.weight) < 0) return s
+  return JOIN_STINGS[0]
+}
 client.on('voiceStateUpdate', async (oldState, newState) => {
-  if (newState.guild?.id !== PEPTIDE_GUILD_ID) return // scoped to a single guild
+  if (newState.guild?.id !== JOIN_STING_GUILD_ID) return // scoped to a single guild
   // only on a genuine channel *entry* (a join, or a move into a channel)
   if (!newState.channelId || oldState.channelId === newState.channelId) return
   if (newState.id === client.user?.id) return // never react to our own join — would loop
   if (newState.member?.user?.bot) return // skip other bots too
-  if (Math.random() >= PEPTIDE_JOIN_CHANCE) return // lose the 2% roll → stay silent
   const who = newState.member?.user?.tag ?? newState.id
   try {
     await joinVoice(client, newState.channelId)
-    enqueueFile(PEPTIDE_JOIN_PATH, newState.guild.id, PEPTIDE_JOIN_GAINDB)
-    channelLog('peptide-join.log', `2% hit — queued peptide_gooner for ${who} (guild ${newState.guild.id})`)
+    const sting = pickJoinSting()
+    enqueueFile(sting.path, newState.guild.id, sting.gainDb)
+    channelLog('join-sting.log', `queued ${sting.path.split('/').pop()} for ${who} (guild ${newState.guild.id})`)
   } catch (err) {
-    process.stderr.write(`peptide-join: failed to play clip: ${err}\n`)
-    channelLog('peptide-join.log', `FAILED for ${who} in ${newState.channelId}: ${err}`)
+    process.stderr.write(`join-sting: failed to play clip: ${err}\n`)
+    channelLog('join-sting.log', `FAILED for ${who} in ${newState.channelId}: ${err}`)
   }
 })
 
