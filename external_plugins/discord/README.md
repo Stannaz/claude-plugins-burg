@@ -1,5 +1,7 @@
 # Discord
 
+> 📌 **This is a fork.** For the burg-bot fork's specific details, extra features, and divergences from upstream, read [FORK.md](../../FORK.md) first.
+
 Connect a Discord bot to your Claude Code with an MCP server.
 
 When the bot receives a message, the MCP server forwards it to Claude and provides tools to reply, react, and edit messages.
