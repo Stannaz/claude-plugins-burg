@@ -1,5 +1,7 @@
 # Claude Code Plugins Directory
 
+> 📌 **This is the burg-bot fork.** For this fork's specific details, extra features, and divergences from upstream, read [FORK.md](./FORK.md) first.
+
 A curated directory of high-quality plugins for Claude Code.
 
 > **⚠️ Important:** Make sure you trust a plugin before installing, updating, or using it. Anthropic does not control what MCP servers, files, or other software are included in plugins and cannot verify that they will work as intended or that they won't change. See each plugin's homepage for more information.
