@@ -68,6 +68,13 @@ try {
 const TOKEN = process.env.DISCORD_BOT_TOKEN
 const STATIC = process.env.DISCORD_ACCESS_MODE === 'static'
 
+// Bot authors are ignored by default (line ~1250). Friend bots listed here
+// (comma-separated ids) bypass that so sibling bots can talk to us — e.g.
+// burg2. Self is still hard-blocked separately; never add our own id here.
+const FRIEND_BOT_IDS = new Set(
+  (process.env.FRIEND_BOT_IDS ?? '').split(',').map(s => s.trim()).filter(Boolean),
+)
+
 if (!TOKEN) {
   process.stderr.write(
     `discord channel: DISCORD_BOT_TOKEN required\n` +
@@ -1247,7 +1254,8 @@ client.on('interactionCreate', async (interaction: Interaction) => {
 })
 
 client.on('messageCreate', msg => {
-  if (msg.author.bot) return
+  if (msg.author.id === client.user?.id) return // never react to our own messages
+  if (msg.author.bot && !FRIEND_BOT_IDS.has(msg.author.id)) return // other bots ignored unless whitelisted
   handleInbound(msg).catch(e => process.stderr.write(`discord: handleInbound failed: ${e}\n`))
 })
 
