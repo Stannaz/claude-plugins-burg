@@ -264,13 +264,20 @@ const dmChannelUsers = new Map<string, string>()
 // burg1's real turn boundary, so an interim "give me a sec" reply mid-turn does
 // NOT stop it (the loop just re-asserts after Discord clears it on send).
 // Keyed per channel; a stray missed stop is bounded by TYPING_MAX_MS.
-const typingIntervals = new Map<string, ReturnType<typeof setInterval>>()
+const typingLoops = new Map<
+  string,
+  { interval: ReturnType<typeof setInterval>; failsafe: ReturnType<typeof setTimeout> }
+>()
 const TYPING_REFRESH_MS = 8000
 const TYPING_MAX_MS = 5 * 60_000
 
 function stopTyping(chat_id: string): void {
-  const h = typingIntervals.get(chat_id)
-  if (h) { clearInterval(h); typingIntervals.delete(chat_id) }
+  const loop = typingLoops.get(chat_id)
+  if (loop) {
+    clearInterval(loop.interval)
+    clearTimeout(loop.failsafe) // orphaned failsafes would kill a LATER loop for this channel
+    typingLoops.delete(chat_id)
+  }
 }
 
 function startTyping(chat_id: string, channel: unknown): void {
@@ -278,14 +285,14 @@ function startTyping(chat_id: string, channel: unknown): void {
   stopTyping(chat_id) // restart the clock; never stack intervals for one channel
   const send = () => void (channel as { sendTyping(): Promise<unknown> }).sendTyping().catch(() => {})
   send() // fire immediately, then keep refreshing
-  const handle = setInterval(send, TYPING_REFRESH_MS)
-  typingIntervals.set(chat_id, handle)
-  setTimeout(() => stopTyping(chat_id), TYPING_MAX_MS).unref?.()
+  const interval = setInterval(send, TYPING_REFRESH_MS)
+  const failsafe = setTimeout(() => stopTyping(chat_id), TYPING_MAX_MS)
+  failsafe.unref?.()
+  typingLoops.set(chat_id, { interval, failsafe })
 }
 
 function stopAllTyping(): void {
-  for (const h of typingIntervals.values()) clearInterval(h)
-  typingIntervals.clear()
+  for (const chat_id of [...typingLoops.keys()]) stopTyping(chat_id)
 }
 
 // Turn-end from the Stop hook. SIGUSR2 (not SIGUSR1, which Node reserves for the
