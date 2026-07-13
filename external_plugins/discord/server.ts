@@ -256,6 +256,43 @@ const RECENT_SENT_CAP = 200
 
 const dmChannelUsers = new Map<string, string>()
 
+// Continuous typing indicator. Discord's typing state auto-expires after ~10s,
+// so a single sendTyping() only shows "typing…" for that long — even while
+// burg1 keeps cooking. Instead we re-send on an interval from inbound until the
+// turn ends, so the indicator covers the whole cooking window (burg2 parity).
+// The turn-end signal is SIGUSR2, sent by the Claude Code Stop hook — that's
+// burg1's real turn boundary, so an interim "give me a sec" reply mid-turn does
+// NOT stop it (the loop just re-asserts after Discord clears it on send).
+// Keyed per channel; a stray missed stop is bounded by TYPING_MAX_MS.
+const typingIntervals = new Map<string, ReturnType<typeof setInterval>>()
+const TYPING_REFRESH_MS = 8000
+const TYPING_MAX_MS = 5 * 60_000
+
+function stopTyping(chat_id: string): void {
+  const h = typingIntervals.get(chat_id)
+  if (h) { clearInterval(h); typingIntervals.delete(chat_id) }
+}
+
+function startTyping(chat_id: string, channel: unknown): void {
+  if (!channel || typeof channel !== 'object' || !('sendTyping' in channel)) return
+  stopTyping(chat_id) // restart the clock; never stack intervals for one channel
+  const send = () => void (channel as { sendTyping(): Promise<unknown> }).sendTyping().catch(() => {})
+  send() // fire immediately, then keep refreshing
+  const handle = setInterval(send, TYPING_REFRESH_MS)
+  typingIntervals.set(chat_id, handle)
+  setTimeout(() => stopTyping(chat_id), TYPING_MAX_MS).unref?.()
+}
+
+function stopAllTyping(): void {
+  for (const h of typingIntervals.values()) clearInterval(h)
+  typingIntervals.clear()
+}
+
+// Turn-end from the Stop hook. SIGUSR2 (not SIGUSR1, which Node reserves for the
+// inspector). The handler is registered at module load, before login/ready
+// writes the pidfile, so there's no window where a signal could terminate us.
+process.on('SIGUSR2', stopAllTyping)
+
 function noteSent(id: string): void {
   recentSentIds.add(id)
   if (recentSentIds.size > RECENT_SENT_CAP) {
@@ -1300,10 +1337,9 @@ async function handleInbound(msg: Message): Promise<void> {
     return
   }
 
-  // Typing indicator — signals "processing" until we reply (or ~10s elapses).
-  if ('sendTyping' in msg.channel) {
-    void msg.channel.sendTyping().catch(() => {})
-  }
+  // Typing indicator — continuous "cooking" signal, refreshed on an interval
+  // until the Stop hook fires SIGUSR2 at turn-end (startTyping/stopAllTyping).
+  startTyping(chat_id, msg.channel)
 
   // Ack reaction — lets the user know we're processing. Fire-and-forget.
   const access = result.access
@@ -1400,6 +1436,10 @@ async function buildReplyMeta(msg: Message): Promise<Record<string, string>> {
 
 client.once('ready', c => {
   process.stderr.write(`discord channel: gateway connected as ${c.user.tag}\n`)
+  // Publish our pid so the Claude Code Stop hook can SIGUSR2 us at turn-end to
+  // clear the continuous typing indicator. Fixed path (env-independent) so the
+  // hook and the plugin always agree; rewritten every boot, so /tmp is fine.
+  try { writeFileSync('/tmp/burg1_discord_plugin.pid', String(process.pid)) } catch {}
 })
 
 if (process.env.ENABLE_PRESENCE_TRACKING === '1') {
