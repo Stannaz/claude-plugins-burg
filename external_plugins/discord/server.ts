@@ -45,6 +45,7 @@ import {
 import { dailyCapUsd } from './stt'
 import { setupPresenceTracking } from './presence'
 import { randomBytes } from 'crypto'
+import { spawn } from 'child_process'
 import { readFileSync, writeFileSync, appendFileSync, mkdirSync, readdirSync, rmSync, statSync, renameSync, realpathSync, chmodSync } from 'fs'
 import { homedir } from 'os'
 import { join, sep } from 'path'
@@ -1236,6 +1237,195 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
 // (grace resets if anyone rejoins). Own voiceStateUpdate listener inside voice.ts.
 registerVoiceAutoLeave(client)
 
+// --- Shared-request claim prehook (burg fork) --------------------------------
+// Some human messages are shared work for BOTH resident bots (burg1 = this
+// plugin, burg2 = the Go daemon) — see isSharedRequest for the precedence
+// rules. For those, run the shared atomic-claim helper (sha256-parity election
+// + O_EXCL claim file) so exactly one bot owns the task. The verdict rides
+// `meta.coordination` on the notification ONLY (stannaz 2026-07-16): delivered
+// content stays byte-for-byte the user's text — no appended line, no
+// sanitising. Meta is bot-controlled, so a user typing "coordination: ..."
+// can't spoof it. NOTE: whether meta keys render to the model is UNVERIFIED
+// until the live restart test; if it doesn't render, that's a known follow-up,
+// not a reason to touch content. For a non-elected caller the helper BLOCKS up
+// to ~10s polling for the primary's claim before rescue-claiming, so it always
+// runs as an async subprocess with a hard 12s guard — on error/timeout/missing
+// script no meta key is set and the message is delivered unchanged.
+//
+// Busy hold (dispatch FIFO): if a previous turn is still in flight at ingress
+// (typingLoops non-empty when handleInbound starts — loops clear on the Stop
+// hook's SIGUSR2), claiming immediately would defeat the failover: burg2 would
+// see the claim and never rescue while this bot sits on the task for minutes.
+// Instead the delivery is held on a module-level FIFO; each turn-end (a second
+// SIGUSR2 listener, chained after stopAllTyping) releases exactly ONE entry —
+// claimed THEN delivered, in arrival order, exactly once (entry removed
+// atomically before its claim starts) — while the rest stay held for later
+// signals. Releasing an entry restarts the typing loop for its channel
+// SYNCHRONOUSLY before the claim is awaited (the helper can poll ~10s), so
+// ingress during that whole window reads busy again — stopAllTyping had just
+// emptied the map. A
+// 60s hold cap per message covers a missed SIGUSR2 (happens — same reason
+// typing has its 5min cap): on expiry the message delivers immediately with
+// meta.coordination set to the "unclaimed" fallback telling the model to run
+// the catch-up claim itself; an idle burg2 will have rescue-claimed at the
+// 10s deadline either way — which is the point.
+// Spec agreed with stannaz + burg2 in #ai-bot, 2026-07-16.
+const CLAIM_SCRIPT = '/root/burg/scripts/shared_claim.py'
+const CLAIM_BOT = 'burg1'
+const CLAIM_TIMEOUT_MS = 12_000
+const SHARED_CHANNEL_ID = '1120322640826077334' // #ai-bot — always addressed to both bots
+const BURGERS_ROLE_ID = '1525853177147293896' // @burgers — pings both bots
+const BURG1_USER_ID = '1494828364018749723'
+const BURG1_ROLE_ID = '1494832430522044660'
+const BURG2_USER_ID = '1525825784923820082'
+const BURG2_ROLE_ID = '1525849199407534193'
+
+// REFERENCE SPEC for shared-request detection — both bots implement exactly
+// this (final agreed precedence, mirrored by burg2's Go side). Uses
+// discord.js's PARSED mentions (msg.mentions.users/roles/repliedUser), never
+// content text: parsed mentions cover <@id>, <@!id> and role forms
+// authoritatively and cannot be spoofed by code-formatted text. A bot author
+// never triggers a claim (one bot addressing the other is 1:1 work) — checked
+// first. Precedence, highest first:
+//   1. @burgers role ping OR both bots pinged → shared (outranks everything).
+//   2. Exactly one bot individually pinged → NOT shared.
+//   3. Message is a reply to either burg (msg.mentions.repliedUser is either
+//      bot id) with no team ping → NOT shared.
+//   4. Human message in #ai-bot → shared.
+//   5. Otherwise → not shared.
+function isSharedRequest(msg: Message): boolean {
+  if (msg.author.bot) return false
+  const burg1 = msg.mentions.users.has(BURG1_USER_ID) || msg.mentions.roles.has(BURG1_ROLE_ID)
+  const burg2 = msg.mentions.users.has(BURG2_USER_ID) || msg.mentions.roles.has(BURG2_ROLE_ID)
+  if (msg.mentions.roles.has(BURGERS_ROLE_ID) || (burg1 && burg2)) return true // 1
+  if (burg1 !== burg2) return false // 2
+  const repliedTo = msg.mentions.repliedUser?.id
+  if (repliedTo === BURG1_USER_ID || repliedTo === BURG2_USER_ID) return false // 3
+  return msg.channelId === SHARED_CHANNEL_ID // 4 (else 5)
+}
+
+// --- Busy-hold FIFO: deliveries deferred to turn-end ---
+const UNCLAIMED_VERDICT = 'unclaimed (busy at ingress — run the claim yourself before acting)'
+const HOLD_CAP_MS = 60_000
+type HeldDelivery = {
+  messageId: string
+  activate: () => void // re-assert busy (restart typing) — MUST run synchronously before the claim is awaited
+  send: (verdict: string | null) => void
+  holdCap: ReturnType<typeof setTimeout>
+}
+const heldDeliveries: HeldDelivery[] = []
+
+// Park a shared-request delivery until turn-end. The hold cap is the missed-
+// SIGUSR2 safety net: if it fires first, the entry is removed (so the release
+// path can't send it again), activated, and delivered with the model-side
+// catch-up fallback.
+function holdDelivery(messageId: string, activate: () => void, send: (verdict: string | null) => void): void {
+  // The shift/splice exactly-once removal already means only one path ever
+  // touches an entry, and startTyping itself restarts cleanly — but keep
+  // double-activation obviously harmless anyway.
+  let activated = false
+  const entry: HeldDelivery = {
+    messageId,
+    activate: () => {
+      if (activated) return
+      activated = true
+      activate()
+    },
+    send,
+    holdCap: setTimeout(() => {
+      const i = heldDeliveries.indexOf(entry)
+      if (i === -1) return // already released
+      heldDeliveries.splice(i, 1)
+      channelLog('shared-claim.log', `claim ${messageId}: hold-cap expired (${HOLD_CAP_MS}ms, missed turn-end) — delivering with catch-up fallback`)
+      entry.activate()
+      entry.send(UNCLAIMED_VERDICT)
+    }, HOLD_CAP_MS),
+  }
+  heldDeliveries.push(entry)
+  channelLog('shared-claim.log', `claim ${messageId}: held (busy at ingress) — claim deferred to turn-end`)
+}
+
+// Release exactly ONE held entry, in arrival order — one per turn-end signal.
+// Releasing the whole FIFO on one signal would claim entries 2+ and shove them
+// into Claude's client-side queue while entry 1 occupies the turn, recreating
+// the busy-hoarding bug one layer down; instead each turn-end frees the next
+// entry only, and the remaining entries' 60s hold caps keep ticking as the
+// backstop. The entry is removed (and its cap cleared) BEFORE its claim
+// starts, so it is delivered exactly once — the hold-cap path no-ops on
+// entries that are gone, and vice versa.
+async function releaseNextHeldDelivery(): Promise<void> {
+  const entry = heldDeliveries.shift()
+  if (!entry) return
+  clearTimeout(entry.holdCap)
+  // Re-assert busy SYNCHRONOUSLY before awaiting the claim: the helper can
+  // poll ~10s, and fresh ingress during that window must read busy — the
+  // typing map was just emptied by stopAllTyping (first SIGUSR2 listener),
+  // so without this a new message would read false-idle and claim over the
+  // reserved turn.
+  entry.activate()
+  entry.send(await claimVerdict(entry.messageId))
+}
+
+// Turn-end release — chained as a SECOND SIGUSR2 listener alongside the typing
+// handler above (process.on('SIGUSR2', stopAllTyping)), not replacing it.
+process.on('SIGUSR2', () => {
+  releaseNextHeldDelivery().catch(err => {
+    process.stderr.write(`discord channel: held-delivery release failed: ${err}\n`)
+  })
+})
+
+// Run the claim helper for one message id. Resolves to the verdict string for
+// meta.coordination — `role=owner`, `role=rescued-owner` or
+// `role=reviewer owner=<bot>` — or null (spawn error / timeout / unparseable
+// output → set nothing, log to shared-claim.log, never break delivery). Never
+// rejects. The done flag guards logging as well as resolution, so a
+// timeout-kill followed by the resulting 'close' (or an 'error' then 'close')
+// logs exactly once.
+function claimVerdict(messageId: string): Promise<string | null> {
+  return new Promise(resolve => {
+    let done = false
+    const finish = (verdict: string | null) => {
+      if (done) return
+      done = true
+      resolve(verdict)
+    }
+    let out = ''
+    const proc = spawn('python3', [CLAIM_SCRIPT, 'claim', messageId, CLAIM_BOT], {
+      stdio: ['ignore', 'pipe', 'ignore'],
+    })
+    const timer = setTimeout(() => {
+      if (done) return
+      channelLog('shared-claim.log', `claim ${messageId}: timeout after ${CLAIM_TIMEOUT_MS}ms, killing`)
+      proc.kill('SIGKILL')
+      finish(null)
+    }, CLAIM_TIMEOUT_MS)
+    proc.stdout.on('data', (d: Buffer) => { out += d.toString() })
+    proc.on('error', err => {
+      // spawn failure (python3/script missing) — 'close' may still follow
+      clearTimeout(timer)
+      if (done) return
+      channelLog('shared-claim.log', `claim ${messageId}: spawn error: ${err.message}`)
+      finish(null)
+    })
+    proc.on('close', code => {
+      clearTimeout(timer)
+      if (done) return // already timed out / errored — don't double-log
+      const line = (out.trim().split('\n')[0] ?? '').trim()
+      const owned = /^(owner|rescued-owner) burg1$/.exec(line)
+      if (code === 0 && owned) {
+        channelLog('shared-claim.log', `claim ${messageId}: role=${owned[1]}`)
+        finish(`role=${owned[1]}`)
+      } else if (code === 1 && /^role=reviewer owner=\S+$/.test(line)) {
+        channelLog('shared-claim.log', `claim ${messageId}: ${line}`)
+        finish(line)
+      } else {
+        channelLog('shared-claim.log', `claim ${messageId}: unparseable (exit=${code}, out=${JSON.stringify(line)})`)
+        finish(null)
+      }
+    })
+  })
+}
+
 // Button-click handler for permission requests. customId is
 // `perm:allow:<id>`, `perm:deny:<id>`, or `perm:more:<id>`.
 // Security mirrors the text-reply path: allowFrom must contain the sender.
@@ -1304,6 +1494,12 @@ client.on('messageCreate', msg => {
 })
 
 async function handleInbound(msg: Message): Promise<void> {
+  // Shared-claim busy signal (burg fork) — must be read before this message's
+  // own startTyping() below makes the map non-empty. Loops are cleared by the
+  // Stop hook's SIGUSR2 at turn-end, so a non-empty map at entry means a
+  // previous turn is still in flight.
+  const busyAtIngress = typingLoops.size > 0
+
   const result = await gate(msg)
 
   if (result.action === 'drop') return
@@ -1369,23 +1565,47 @@ async function handleInbound(msg: Message): Promise<void> {
 
   const replyMeta = await buildReplyMeta(msg)
 
-  mcp.notification({
-    method: 'notifications/claude/channel',
-    params: {
-      content,
-      meta: {
-        chat_id,
-        message_id: msg.id,
-        user: msg.author.username,
-        user_id: msg.author.id,
-        ts: londonTs(msg.createdAt),
-        ...(atts.length > 0 ? { attachment_count: String(atts.length), attachments: atts.join('; ') } : {}),
-        ...replyMeta,
+  // Shared-request claim prehook (burg fork, helpers ~L1240): resolve
+  // owner/reviewer via the shared claim helper and carry the verdict on
+  // meta.coordination ONLY — content stays byte-for-byte the user's text.
+  // Busy at ingress → hold the delivery on the FIFO until turn-end (or the
+  // 60s hold cap), claim then. Idle → awaited claim now (≤12s guard) — the
+  // wait only delays THIS message's notification, never the event loop or
+  // other inbound handling.
+  const deliver = (coordination: string | null) => {
+    mcp.notification({
+      method: 'notifications/claude/channel',
+      params: {
+        content,
+        meta: {
+          chat_id,
+          message_id: msg.id,
+          user: msg.author.username,
+          user_id: msg.author.id,
+          ts: londonTs(msg.createdAt),
+          ...(atts.length > 0 ? { attachment_count: String(atts.length), attachments: atts.join('; ') } : {}),
+          ...replyMeta,
+          ...(coordination !== null ? { coordination } : {}),
+        },
       },
-    },
-  }).catch(err => {
-    process.stderr.write(`discord channel: failed to deliver inbound to Claude: ${err}\n`)
-  })
+    }).catch(err => {
+      process.stderr.write(`discord channel: failed to deliver inbound to Claude: ${err}\n`)
+    })
+  }
+
+  if (isSharedRequest(msg)) {
+    if (busyAtIngress) {
+      // activate re-asserts busy (restarts typing for this channel) and runs
+      // synchronously at release BEFORE the claim is awaited — see
+      // releaseNextHeldDelivery. The hold-cap-expiry path calls it too.
+      holdDelivery(msg.id, () => startTyping(chat_id, msg.channel), deliver)
+    } else {
+      deliver(await claimVerdict(msg.id))
+    }
+    return
+  }
+
+  deliver(null)
 }
 
 const REPLY_PREVIEW_MAX = 80
