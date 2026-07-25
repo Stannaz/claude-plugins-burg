@@ -1202,11 +1202,12 @@ function channelLog(file: string, line: string): void {
 // (% = 10^(dB/20)): Bangarang/Ali-A 20%, peptide 60%, Soda 80%, Newports/gold-Scar 100%.
 const JOIN_STING_GUILD_ID = '1119325622855008407' // only fires in this guild
 const JOIN_STINGS: { path: string; weight: number; gainDb: number }[] = [
-  { path: join(import.meta.dir, 'assets', 'bangarang_intro.mp3'), weight: 41.45, gainDb: -14 }, // ~20%
-  { path: join(import.meta.dir, 'assets', 'alia_intro.mp3'), weight: 41.45, gainDb: -14 },      // ~20%
+  { path: join(import.meta.dir, 'assets', 'bangarang_intro.mp3'), weight: 37.95, gainDb: -14 }, // ~20%
+  { path: join(import.meta.dir, 'assets', 'alia_intro.mp3'), weight: 37.95, gainDb: -14 },      // ~20%
   { path: join(import.meta.dir, 'assets', 'newports_join.mp3'), weight: 10, gainDb: 0 },         // 100%
   { path: join(import.meta.dir, 'assets', 'soda_join.mp3'), weight: 5, gainDb: -1.9 },           // ~80%
   { path: join(import.meta.dir, 'assets', 'peptide_gooner_join.mp3'), weight: 2, gainDb: -4.4 }, // ~60%
+  { path: join(import.meta.dir, 'assets', 'poplock_join.mp3'), weight: 7, gainDb: -3 },          // ~70%, noci 2026-07-25 (yt oZPC5b2z2Ag 0:22-0:35)
   { path: join(import.meta.dir, 'assets', 'goldscar_join.mp3'), weight: 0.1, gainDb: 0 },        // 100%, 1-in-1000 jackpot (yt 9KpWPNVW8Dw)
 ]
 function pickJoinSting(): { path: string; weight: number; gainDb: number } {
