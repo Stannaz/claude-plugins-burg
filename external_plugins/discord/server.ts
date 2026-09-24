@@ -1275,11 +1275,12 @@ const CLAIM_SCRIPT = '/root/burg/scripts/shared_claim.py'
 const CLAIM_BOT = 'burg1'
 const CLAIM_TIMEOUT_MS = 12_000
 const SHARED_CHANNEL_ID = '1120322640826077334' // #ai-bot — always addressed to both bots
+const BURG_CHANNEL_ID = '1523307485786673302' // #burg — shared when unaddressed
 const BURGERS_ROLE_ID = '1525853177147293896' // @burgers — pings both bots
 const BURG1_USER_ID = '1494828364018749723'
 const BURG1_ROLE_ID = '1494832430522044660'
 const BURG2_USER_ID = '1525825784923820082'
-const BURG2_ROLE_ID = '1525849199407534193'
+const BURG2_ROLE_ID = '1525847709771366472'
 
 // REFERENCE SPEC for shared-request detection — both bots implement exactly
 // this (final agreed precedence, mirrored by burg2's Go side). Uses
@@ -1292,7 +1293,7 @@ const BURG2_ROLE_ID = '1525849199407534193'
 //   2. Exactly one bot individually pinged → NOT shared.
 //   3. Message is a reply to either burg (msg.mentions.repliedUser is either
 //      bot id) with no team ping → NOT shared.
-//   4. Human message in #ai-bot → shared.
+//   4. Human message in #ai-bot or #burg → shared.
 //   5. Otherwise → not shared.
 function isSharedRequest(msg: Message): boolean {
   if (msg.author.bot) return false
@@ -1302,7 +1303,7 @@ function isSharedRequest(msg: Message): boolean {
   if (burg1 !== burg2) return false // 2
   const repliedTo = msg.mentions.repliedUser?.id
   if (repliedTo === BURG1_USER_ID || repliedTo === BURG2_USER_ID) return false // 3
-  return msg.channelId === SHARED_CHANNEL_ID // 4 (else 5)
+  return msg.channelId === SHARED_CHANNEL_ID || msg.channelId === BURG_CHANNEL_ID // 4 (else 5)
 }
 
 // --- Busy-hold FIFO: deliveries deferred to turn-end ---
