@@ -1190,25 +1190,36 @@ function channelLog(file: string, line: string): void {
 }
 
 // --- Weighted-random VC-join sting (burg fork) ------------------------------
-// noci-requested, stannaz-greenlit (noci has full authority over the join-sound
-// gag per stannaz). On a genuine voice-channel entry in the one guild below, roll
-// once across the weighted table and blast the picked clip. Weights ARE percent
-// chances and sum to 100, so every join plays something. noci's split (2026-06-18):
-// Bangarang 41.45 / Ali-A 41.45 / Newports 10 / Soda 5 / peptide gooner 2 / gold-Scar
-// 0.1 — and his standing rule: any FUTURE clip takes its % out of Bangarang/Ali-A, not
-// silence (which is why those two are now 41.45 each, shaved 0.05 apiece for gold-Scar).
-// Volume via gainDb, an offset applied AFTER the voice player's loudnorm (baking it
-// into the asset does nothing — loudnorm cancels it). Per-clip levels set by stannaz
-// (% = 10^(dB/20)): Bangarang/Ali-A 20%, peptide 60%, Soda 80%, Newports/gold-Scar 100%.
+// noci has full authority over the join-sound gag (stannaz). On a genuine voice-channel
+// entry in the one guild below, roll once across the weighted table and play the clip.
+// Weights ARE percent chances and sum to 100, so every join plays something. noci's
+// standing rule: any new clip takes its % equally from Bangarang and Ali-A, never silence.
+// Ported 2026-09-24 from burg2's goburg/join_stings.go (19 clips) when stannaz moved
+// join stings back to burg1 (Discord 1552693250362572971). Assets are burg2's pre-encoded
+// Opus files; playFileNow re-normalises to TARGET_LUFS (-16, the same target
+// goburg/scripts/encode_join_stings.sh uses) and gainDb re-applies that script's per-clip
+// extra gain, so levels match burg2's.
 const JOIN_STING_GUILD_ID = '1119325622855008407' // only fires in this guild
 const JOIN_STINGS: { path: string; weight: number; gainDb: number }[] = [
-  { path: join(import.meta.dir, 'assets', 'bangarang_intro.mp3'), weight: 37.95, gainDb: -14 }, // ~20%
-  { path: join(import.meta.dir, 'assets', 'alia_intro.mp3'), weight: 37.95, gainDb: -14 },      // ~20%
-  { path: join(import.meta.dir, 'assets', 'newports_join.mp3'), weight: 10, gainDb: 0 },         // 100%
-  { path: join(import.meta.dir, 'assets', 'soda_join.mp3'), weight: 5, gainDb: -1.9 },           // ~80%
-  { path: join(import.meta.dir, 'assets', 'peptide_gooner_join.mp3'), weight: 2, gainDb: -4.4 }, // ~60%
-  { path: join(import.meta.dir, 'assets', 'poplock_join.mp3'), weight: 7, gainDb: -3 },          // ~70%, noci 2026-07-25 (yt oZPC5b2z2Ag 0:22-0:35)
-  { path: join(import.meta.dir, 'assets', 'goldscar_join.mp3'), weight: 0.1, gainDb: 0 },        // 100%, 1-in-1000 jackpot (yt 9KpWPNVW8Dw)
+  { path: join(import.meta.dir, 'assets', 'join_stings', 'bangarang_intro.opus'), weight: 13.25, gainDb: -14 },
+  { path: join(import.meta.dir, 'assets', 'join_stings', 'alia_intro.opus'), weight: 13.25, gainDb: -14 },
+  { path: join(import.meta.dir, 'assets', 'join_stings', 'newports_join.opus'), weight: 9, gainDb: 0 },
+  { path: join(import.meta.dir, 'assets', 'join_stings', 'soda_join.opus'), weight: 5, gainDb: -1.9 },
+  { path: join(import.meta.dir, 'assets', 'join_stings', 'peptide_gooner_join.opus'), weight: 2, gainDb: -4.4 },
+  { path: join(import.meta.dir, 'assets', 'join_stings', 'poplock_join.opus'), weight: 7, gainDb: -3 },
+  { path: join(import.meta.dir, 'assets', 'join_stings', 'goldscar_join.opus'), weight: 0.1, gainDb: 0 },
+  { path: join(import.meta.dir, 'assets', 'join_stings', 'homer_barts_out_join.opus'), weight: 6.7, gainDb: 0 },
+  { path: join(import.meta.dir, 'assets', 'join_stings', 'hes_going_deep_join.opus'), weight: 4.2, gainDb: 0 },
+  { path: join(import.meta.dir, 'assets', 'join_stings', 'moe_intro_join.opus'), weight: 7.5, gainDb: 0 },
+  { path: join(import.meta.dir, 'assets', 'join_stings', 'chicken_on_a_raft_join.opus'), weight: 4, gainDb: 0 },
+  { path: join(import.meta.dir, 'assets', 'join_stings', 'oh_no_no_no_funk_join.opus'), weight: 5, gainDb: 0 },
+  { path: join(import.meta.dir, 'assets', 'join_stings', 'golden_bangarang_join.opus'), weight: 2.5, gainDb: 0 },
+  { path: join(import.meta.dir, 'assets', 'join_stings', 'trihards_join.opus'), weight: 4, gainDb: 0 },
+  { path: join(import.meta.dir, 'assets', 'join_stings', 'keemstar_join.opus'), weight: 2.5, gainDb: 0 },
+  { path: join(import.meta.dir, 'assets', 'join_stings', 'lobster_jet_join.opus'), weight: 4, gainDb: 0 },
+  { path: join(import.meta.dir, 'assets', 'join_stings', 'turn_red_join.opus'), weight: 4, gainDb: 0 },
+  { path: join(import.meta.dir, 'assets', 'join_stings', 'turbo_turn_red_join.opus'), weight: 1.5, gainDb: 0 },
+  { path: join(import.meta.dir, 'assets', 'join_stings', 'chills_out_of_context_join.opus'), weight: 4.5, gainDb: 0 },
 ]
 function pickJoinSting(): { path: string; weight: number; gainDb: number } {
   const total = JOIN_STINGS.reduce((s, x) => s + x.weight, 0)
