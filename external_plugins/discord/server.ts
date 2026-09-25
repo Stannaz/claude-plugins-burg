@@ -1201,9 +1201,9 @@ function channelLog(file: string, line: string): void {
 // extra gain, so levels match burg2's.
 const JOIN_STING_GUILD_ID = '1119325622855008407' // only fires in this guild
 const JOIN_STINGS: { path: string; weight: number; gainDb: number }[] = [
-  { path: join(import.meta.dir, 'assets', 'join_stings', 'bangarang_intro.opus'), weight: 13.25, gainDb: -14 },
-  { path: join(import.meta.dir, 'assets', 'join_stings', 'alia_intro.opus'), weight: 13.25, gainDb: -14 },
-  { path: join(import.meta.dir, 'assets', 'join_stings', 'newports_join.opus'), weight: 9, gainDb: 0 },
+  { path: join(import.meta.dir, 'assets', 'join_stings', 'bangarang_intro.opus'), weight: 12.75, gainDb: -14 },
+  { path: join(import.meta.dir, 'assets', 'join_stings', 'alia_intro.opus'), weight: 12.75, gainDb: -14 },
+  { path: join(import.meta.dir, 'assets', 'join_stings', 'newports_join.opus'), weight: 7, gainDb: 0 },
   { path: join(import.meta.dir, 'assets', 'join_stings', 'soda_join.opus'), weight: 5, gainDb: -1.9 },
   { path: join(import.meta.dir, 'assets', 'join_stings', 'peptide_gooner_join.opus'), weight: 2, gainDb: -4.4 },
   { path: join(import.meta.dir, 'assets', 'join_stings', 'poplock_join.opus'), weight: 7, gainDb: -3 },
@@ -1220,6 +1220,7 @@ const JOIN_STINGS: { path: string; weight: number; gainDb: number }[] = [
   { path: join(import.meta.dir, 'assets', 'join_stings', 'turn_red_join.opus'), weight: 4, gainDb: 0 },
   { path: join(import.meta.dir, 'assets', 'join_stings', 'turbo_turn_red_join.opus'), weight: 1.5, gainDb: 0 },
   { path: join(import.meta.dir, 'assets', 'join_stings', 'chills_out_of_context_join.opus'), weight: 4.5, gainDb: 0 },
+  { path: join(import.meta.dir, 'assets', 'join_stings', 'capy_hitstick_join.opus'), weight: 3, gainDb: 0 },
 ]
 function pickJoinSting(): { path: string; weight: number; gainDb: number } {
   const total = JOIN_STINGS.reduce((s, x) => s + x.weight, 0)
