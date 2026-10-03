@@ -1201,12 +1201,12 @@ function channelLog(file: string, line: string): void {
 // extra gain, so levels match burg2's.
 const JOIN_STING_GUILD_ID = '1119325622855008407' // only fires in this guild
 const JOIN_STINGS: { path: string; weight: number; gainDb: number }[] = [
-  { path: join(import.meta.dir, 'assets', 'join_stings', 'bangarang_intro.opus'), weight: 12.75, gainDb: -14 },
-  { path: join(import.meta.dir, 'assets', 'join_stings', 'alia_intro.opus'), weight: 12.75, gainDb: -14 },
-  { path: join(import.meta.dir, 'assets', 'join_stings', 'newports_join.opus'), weight: 7, gainDb: 0 },
+  { path: join(import.meta.dir, 'assets', 'join_stings', 'bangarang_intro.opus'), weight: 11.75, gainDb: -14 },
+  { path: join(import.meta.dir, 'assets', 'join_stings', 'alia_intro.opus'), weight: 11.75, gainDb: -14 },
+  { path: join(import.meta.dir, 'assets', 'join_stings', 'newports_join.opus'), weight: 6.5, gainDb: 0 },
   { path: join(import.meta.dir, 'assets', 'join_stings', 'soda_join.opus'), weight: 5, gainDb: -1.9 },
   { path: join(import.meta.dir, 'assets', 'join_stings', 'peptide_gooner_join.opus'), weight: 2, gainDb: -4.4 },
-  { path: join(import.meta.dir, 'assets', 'join_stings', 'poplock_join.opus'), weight: 7, gainDb: -3 },
+  { path: join(import.meta.dir, 'assets', 'join_stings', 'poplock_join.opus'), weight: 6.5, gainDb: -3 },
   { path: join(import.meta.dir, 'assets', 'join_stings', 'goldscar_join.opus'), weight: 0.1, gainDb: 0 },
   { path: join(import.meta.dir, 'assets', 'join_stings', 'homer_barts_out_join.opus'), weight: 6.7, gainDb: 0 },
   { path: join(import.meta.dir, 'assets', 'join_stings', 'hes_going_deep_join.opus'), weight: 4.2, gainDb: 0 },
@@ -1221,6 +1221,7 @@ const JOIN_STINGS: { path: string; weight: number; gainDb: number }[] = [
   { path: join(import.meta.dir, 'assets', 'join_stings', 'turbo_turn_red_join.opus'), weight: 1.5, gainDb: 0 },
   { path: join(import.meta.dir, 'assets', 'join_stings', 'chills_out_of_context_join.opus'), weight: 4.5, gainDb: 0 },
   { path: join(import.meta.dir, 'assets', 'join_stings', 'capy_hitstick_join.opus'), weight: 3, gainDb: 0 },
+  { path: join(import.meta.dir, 'assets', 'join_stings', 'barts_out_boosted_join.opus'), weight: 3, gainDb: 0 },
 ]
 function pickJoinSting(): { path: string; weight: number; gainDb: number } {
   const total = JOIN_STINGS.reduce((s, x) => s + x.weight, 0)
