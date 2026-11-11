@@ -1,8 +1,6 @@
 /**
  * Deepgram live STT for the discord MCP plugin.
  *
- * Phase 2 of the voice fork — see /root/burgplans/voice-fork-migration.md.
- *
  * One STTSession per (guild, user) actively speaking. Lifecycle:
  *   constructor → start()
  *     → opens deepgram ws (model nova-3, linear16 48k stereo, mip_opt_out=true)
@@ -82,7 +80,6 @@ const FAILURE_THRESHOLD = 3
 const HEALTH_CHECK_INTERVAL_MS = 60_000
 let recentFailures: number[] = []
 let _unavailable = false
-let _lastUnavailableReason = ''
 let healthCheckTimer: ReturnType<typeof setInterval> | null = null
 
 export type AvailabilityListener = {
@@ -105,7 +102,6 @@ function recordFailure(reason: string): void {
   recentFailures.push(now)
   if (!_unavailable && recentFailures.length >= FAILURE_THRESHOLD) {
     _unavailable = true
-    _lastUnavailableReason = reason
     availabilityListener?.onUnavailable(reason)
     startHealthCheck()
   }
@@ -139,7 +135,6 @@ function markRecovered(): void {
   if (!_unavailable) return
   _unavailable = false
   recentFailures = []
-  _lastUnavailableReason = ''
   if (healthCheckTimer) {
     clearInterval(healthCheckTimer)
     healthCheckTimer = null
@@ -387,7 +382,7 @@ export class STTSession {
 }
 
 /**
- * Cheap pre-flight so the plugin can refuse to start phase-2 work if the key
+ * Cheap pre-flight so the plugin can refuse to start STT work if the key
  * is missing/empty. Safe to call repeatedly (cached after first read).
  */
 export function deepgramKeyAvailable(): boolean {

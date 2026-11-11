@@ -1,14 +1,16 @@
 /**
  * Voice transport for the discord MCP plugin.
  *
- * Phase 1: voice gateway connection, audio playback, edge-tts TTS.
- * No STT, no wake-word filter, no streaming chunker — those land in
- * later phases. See /root/burgplans/voice-fork-migration.md.
+ * Voice gateway connection, audio playback (files + edge-tts TTS), the
+ * per-user Deepgram STT wiring (sessions themselves live in stt.ts), echo
+ * guard, auto-rejoin and leave-when-alone. The wake-word gate on transcripts
+ * is in server.ts.
  *
  * Per-guild state:
  *   - VoiceConnection (one per guild — Discord's hard limit)
  *   - AudioPlayer
  *   - FIFO queue of items to play (file path | TTS text)
+ *   - STT sessions, one per user currently speaking
  *   - lockfile so a second plugin instance for the same guild bails
  *
  * The plugin is stdio-spawned by Claude Code, so all state here lives only
@@ -63,7 +65,6 @@ const TTS_VOICE_DEFAULT = 'en-GB-RyanNeural'
 type QueueItem =
   | { kind: 'file'; path: string; gainDb?: number }
   | { kind: 'tts'; text: string; voice: string }
-  | { kind: 'stream'; stream: Readable; inputType: StreamType }
 
 type GuildVoiceState = {
   guildId: string
@@ -120,7 +121,7 @@ export type VoiceCallbacks = {
    * spoken reply didn't go out. */
   onTTSFailure?: (failure: TTSFailure) => void
   /** Called once per finalised transcript from Deepgram. server.ts forwards
-   *  every transcript as an inbound <voice> event (echo-guarded). */
+   *  the wake-word ones as inbound <voice> events (echo-guarded). */
   onTranscript?: (r: TranscriptResult) => void
   /** Called when a deepgram session errors out (auth, network, etc). */
   onSTTError?: (info: { guildId: string; channelId: string; userId: string; reason: string }) => void
@@ -152,12 +153,8 @@ function logVoice(line: string): void {
 
 export type GateDecision =
   | 'forwarded'
-  | 'skipped_cooldown'
   | 'skipped_echo_match'
   | 'skipped_no_wake_word'
-  | 'skipped_budget'
-  | 'played_file'
-  | 'tts_failed'
 
 export type UtteranceLogRow = {
   speakerId: string
@@ -167,8 +164,6 @@ export type UtteranceLogRow = {
   confidence?: number
   latencyMs?: number
   gateDecision: GateDecision
-  ttsFirstAudioMs?: number
-  error?: string
 }
 
 function tsvEscape(v: unknown): string {
@@ -193,8 +188,8 @@ export function logUtterance(row: UtteranceLogRow): void {
       row.confidence != null ? row.confidence.toFixed(3) : '',
       row.latencyMs != null ? String(row.latencyMs) : '',
       row.gateDecision,
-      row.ttsFirstAudioMs != null ? String(row.ttsFirstAudioMs) : '',
-      row.error ?? '',
+      '', // tts_first_audio_ms — never populated; column kept so the TSV shape is stable
+      '', // error — likewise
     ].map(tsvEscape).join('\t') + '\n'
     appendFileSync(path, line)
   } catch (err) {
@@ -415,12 +410,6 @@ export function leaveVoice(guildId?: string): string {
   releaseLock(target)
   logVoice(`left voice in guild ${target}`)
   return `left voice in guild ${target}`
-}
-
-export function leaveAll(): void {
-  for (const guildId of [...states.keys()]) {
-    try { leaveVoice(guildId) } catch {}
-  }
 }
 
 /** Grace period before the bot leaves a channel it's alone in. Reset by anyone
@@ -762,8 +751,7 @@ export function status(): string {
 
 function describeItem(item: QueueItem): string {
   if (item.kind === 'file') return `file ${item.path}`
-  if (item.kind === 'tts') return `tts "${item.text.slice(0, 40)}${item.text.length > 40 ? '…' : ''}"`
-  return 'stream'
+  return `tts "${item.text.slice(0, 40)}${item.text.length > 40 ? '…' : ''}"`
 }
 
 async function runQueue(s: GuildVoiceState): Promise<void> {
@@ -774,10 +762,8 @@ async function runQueue(s: GuildVoiceState): Promise<void> {
   try {
     if (next.kind === 'file') {
       await playFileNow(s, next.path, next.gainDb)
-    } else if (next.kind === 'tts') {
-      await playTTSNow(s, next.text, next.voice)
     } else {
-      await playStreamNow(s, next.stream, next.inputType)
+      await playTTSNow(s, next.text, next.voice)
     }
   } catch (err) {
     logVoice(`queue item failed: ${err instanceof Error ? err.message : err}`)
@@ -890,11 +876,6 @@ async function playFileNow(s: GuildVoiceState, path: string, extraGainDb = 0): P
   s.player.play(resource)
 }
 
-async function playStreamNow(s: GuildVoiceState, stream: Readable, inputType: StreamType): Promise<void> {
-  const resource = createAudioResource(stream, { inputType })
-  s.player.play(resource)
-}
-
 /**
  * TTS via edge-tts CLI → MP3 stdout → spawnPcm (fixed static gain → raw PCM)
  * → @discordjs/voice as StreamType.Raw. The gain (TTS_GAIN_DB) matches spoken
@@ -946,5 +927,7 @@ async function playTTSNow(s: GuildVoiceState, text: string, voice: string): Prom
 // Voice connections must be torn down on plugin shutdown — leaving them open
 // holds Discord-side voice state and prevents reconnection until timeout.
 export function shutdownVoice(): void {
-  leaveAll()
+  for (const guildId of [...states.keys()]) {
+    try { leaveVoice(guildId) } catch {}
+  }
 }
