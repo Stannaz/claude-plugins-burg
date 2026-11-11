@@ -524,6 +524,9 @@ function teardownState(s: GuildVoiceState): void {
     s.emptyLeaveTimer = null
   }
   killSTTSessions(s)
+  // Clear first: stop(true) emits Idle synchronously, and advance() would
+  // otherwise start the next queued item after killChildren, leaking it.
+  s.queue = []
   killChildren(s)
   try { s.player.stop(true) } catch {}
   try { s.connection.destroy() } catch {}
