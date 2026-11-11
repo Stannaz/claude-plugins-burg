@@ -69,7 +69,7 @@ try {
 const TOKEN = process.env.DISCORD_BOT_TOKEN
 const STATIC = process.env.DISCORD_ACCESS_MODE === 'static'
 
-// Bot authors are ignored by default (line ~1250). Friend bots listed here
+// Bot authors are ignored by default (messageCreate handler). Friend bots listed here
 // (comma-separated ids) bypass that so sibling bots can talk to us — e.g.
 // burg2. Self is still hard-blocked separately; never add our own id here.
 const FRIEND_BOT_IDS = new Set(
@@ -107,9 +107,8 @@ const client = new Client({
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
-    // Voice (phase 1+): GuildVoiceStates is required for the voice gateway to
-    // wire up at all; GuildMembers lets us resolve SSRC → user when STT lands
-    // in phase 2. Adding both now so we don't have to reconnect later.
+    // Voice: GuildVoiceStates is required for the voice gateway to wire up at
+    // all; GuildMembers lets us resolve SSRC → user for STT.
     GatewayIntentBits.GuildVoiceStates,
     GatewayIntentBits.GuildMembers,
     // GuildPresences is privileged — must be toggled in the Discord dev portal.
@@ -1016,26 +1015,28 @@ function voiceWho(guildId?: string): string {
 // reliably transcribed even in noisy audio.
 const VOICE_WAKE_RE = /\bburg(ers?)?\b/i
 
+// Every voice-side event reaches the main session as a <voice> inbound. `what`
+// only names the event in the stderr line when delivery fails.
+function notifyVoice(what: string, content: string, meta: Record<string, string>): void {
+  mcp.notification({
+    method: 'notifications/claude/channel',
+    params: { content, meta: { source: 'voice', ...meta } },
+  }).catch(err => {
+    process.stderr.write(`discord channel: failed to deliver ${what}: ${err}\n`)
+  })
+}
+
 setVoiceCallbacks({
   // edge-tts errors surface as a one-shot <voice tts_failed=true> inbound so
   // the main session knows the spoken reply didn't go out.
   onTTSFailure: ({ guildId, channelId, reason, text }) => {
-    mcp.notification({
-      method: 'notifications/claude/channel',
-      params: {
-        content: `(tts failed: ${reason})`,
-        meta: {
-          source: 'voice',
-          tts_failed: 'true',
-          reason,
-          guild_id: guildId,
-          channel_id: channelId,
-          text_preview: truncCodePoints(text, 200),
-          ts: londonTs(new Date()),
-        },
-      },
-    }).catch(err => {
-      process.stderr.write(`discord channel: failed to deliver tts_failed event: ${err}\n`)
+    notifyVoice('tts_failed event', `(tts failed: ${reason})`, {
+      tts_failed: 'true',
+      reason,
+      guild_id: guildId,
+      channel_id: channelId,
+      text_preview: truncCodePoints(text, 200),
+      ts: londonTs(new Date()),
     })
   },
 
@@ -1048,49 +1049,28 @@ setVoiceCallbacks({
   // one Read away.
   onTranscript: async r => {
     const username = await resolveUsername(r.userId)
-    if (isLikelyBotEcho(r.text, r.guildId)) {
-      logUtterance({
-        speakerId: r.userId, speakerName: username, direction: 'in',
-        text: r.text, confidence: r.confidence, latencyMs: r.latencyMs,
-        gateDecision: 'skipped_echo_match',
-      })
-      return
-    }
-    if (!VOICE_WAKE_RE.test(r.text)) {
-      logUtterance({
-        speakerId: r.userId, speakerName: username, direction: 'in',
-        text: r.text, confidence: r.confidence, latencyMs: r.latencyMs,
-        gateDecision: 'skipped_no_wake_word',
-      })
-      return
-    }
+    const gateDecision = isLikelyBotEcho(r.text, r.guildId) ? 'skipped_echo_match'
+      : !VOICE_WAKE_RE.test(r.text) ? 'skipped_no_wake_word'
+      : 'forwarded'
     logUtterance({
       speakerId: r.userId, speakerName: username, direction: 'in',
       text: r.text, confidence: r.confidence, latencyMs: r.latencyMs,
-      gateDecision: 'forwarded',
+      gateDecision,
     })
-    mcp.notification({
-      method: 'notifications/claude/channel',
-      params: {
-        content: r.text,
-        meta: {
-          source: 'voice',
-          channel_id: r.channelId,
-          guild_id: r.guildId,
-          user: username,
-          user_id: r.userId,
-          ts: londonTs(new Date()),
-          confidence: r.confidence.toFixed(3),
-          latency_ms: String(r.latencyMs),
-        },
-      },
-    }).catch(err => {
-      process.stderr.write(`discord channel: failed to deliver voice transcript: ${err}\n`)
+    if (gateDecision !== 'forwarded') return
+    notifyVoice('voice transcript', r.text, {
+      channel_id: r.channelId,
+      guild_id: r.guildId,
+      user: username,
+      user_id: r.userId,
+      ts: londonTs(new Date()),
+      confidence: r.confidence.toFixed(3),
+      latency_ms: String(r.latencyMs),
     })
   },
 
-  // Deepgram-side errors: best-effort log only. Repeated failures + circuit
-  // breaker land in a later commit (phase-2 graceful degradation).
+  // Deepgram-side errors: best-effort log only. Repeated failures trip the
+  // availability breaker in stt.ts (onDeepgramUnavailable below).
   onSTTError: ({ guildId, channelId, userId, reason }) => {
     process.stderr.write(`discord channel: stt error guild=${guildId} channel=${channelId} user=${userId}: ${reason}\n`)
   },
@@ -1099,55 +1079,32 @@ setVoiceCallbacks({
   // knows STT is silently off until 00:00 UTC. Repeats are suppressed in
   // voice.ts (per-guild flag).
   onBudgetExceeded: ({ guildId, channelId }) => {
-    mcp.notification({
-      method: 'notifications/claude/channel',
-      params: {
-        content: `(deepgram daily budget cap of $${dailyCapUsd().toFixed(2)} reached — voice transcription off until 00:00 UTC)`,
-        meta: {
-          source: 'voice',
-          budget_exceeded: 'true',
-          channel_id: channelId,
-          guild_id: guildId,
-          ts: londonTs(new Date()),
-        },
+    notifyVoice(
+      'budget event',
+      `(deepgram daily budget cap of $${dailyCapUsd().toFixed(2)} reached — voice transcription off until 00:00 UTC)`,
+      {
+        budget_exceeded: 'true',
+        channel_id: channelId,
+        guild_id: guildId,
+        ts: londonTs(new Date()),
       },
-    }).catch(err => {
-      process.stderr.write(`discord channel: failed to deliver budget event: ${err}\n`)
-    })
+    )
   },
 
   // Repeated Deepgram failures: surface a one-shot so the main session
   // knows transcripts have stopped arriving (and won't be confused by
   // sudden silence in vc).
   onDeepgramUnavailable: ({ reason }) => {
-    mcp.notification({
-      method: 'notifications/claude/channel',
-      params: {
-        content: `(deepgram unreachable — voice transcription paused. reason: ${reason})`,
-        meta: {
-          source: 'voice',
-          deepgram_unavailable: 'true',
-          reason,
-          ts: londonTs(new Date()),
-        },
-      },
-    }).catch(err => {
-      process.stderr.write(`discord channel: failed to deliver dg-unavailable event: ${err}\n`)
+    notifyVoice('dg-unavailable event', `(deepgram unreachable — voice transcription paused. reason: ${reason})`, {
+      deepgram_unavailable: 'true',
+      reason,
+      ts: londonTs(new Date()),
     })
   },
   onDeepgramRecovered: () => {
-    mcp.notification({
-      method: 'notifications/claude/channel',
-      params: {
-        content: '(deepgram recovered — voice transcription resumed)',
-        meta: {
-          source: 'voice',
-          deepgram_recovered: 'true',
-          ts: londonTs(new Date()),
-        },
-      },
-    }).catch(err => {
-      process.stderr.write(`discord channel: failed to deliver dg-recovered event: ${err}\n`)
+    notifyVoice('dg-recovered event', '(deepgram recovered — voice transcription resumed)', {
+      deepgram_recovered: 'true',
+      ts: londonTs(new Date()),
     })
   },
 })
@@ -1179,8 +1136,8 @@ client.on('error', err => {
 // --- channel-plugin log files ----------------------------------------------
 // Append-only logger for the discord *channel* plugin (this file), distinct
 // from voice.ts's /root/burg/voice/logs. Each concern gets its own file under
-// CHANNEL_LOG_DIR — pass the basename. First user is the Ali-A join below;
-// more files will be added over time. Never throws (best-effort logging).
+// CHANNEL_LOG_DIR — pass the basename. Only user so far is the join sting
+// below (join-sting.log). Never throws (best-effort logging).
 const CHANNEL_LOG_DIR = '/root/burg/logs'
 function channelLog(file: string, line: string): void {
   try {
@@ -1200,32 +1157,35 @@ function channelLog(file: string, line: string): void {
 // goburg/scripts/encode_join_stings.sh uses) and gainDb re-applies that script's per-clip
 // extra gain, so levels match burg2's.
 const JOIN_STING_GUILD_ID = '1119325622855008407' // only fires in this guild
-const JOIN_STINGS: { path: string; weight: number; gainDb: number }[] = [
-  { path: join(import.meta.dir, 'assets', 'join_stings', 'bangarang_intro.opus'), weight: 9.25, gainDb: -14 },
-  { path: join(import.meta.dir, 'assets', 'join_stings', 'alia_intro.opus'), weight: 9.25, gainDb: -14 },
-  { path: join(import.meta.dir, 'assets', 'join_stings', 'newports_join.opus'), weight: 6.5, gainDb: 0 },
-  { path: join(import.meta.dir, 'assets', 'join_stings', 'soda_join.opus'), weight: 5, gainDb: -1.9 },
-  { path: join(import.meta.dir, 'assets', 'join_stings', 'peptide_gooner_join.opus'), weight: 2, gainDb: -4.4 },
-  { path: join(import.meta.dir, 'assets', 'join_stings', 'poplock_join.opus'), weight: 6.5, gainDb: -3 },
-  { path: join(import.meta.dir, 'assets', 'join_stings', 'goldscar_join.opus'), weight: 0.1, gainDb: 0 },
-  { path: join(import.meta.dir, 'assets', 'join_stings', 'homer_barts_out_join.opus'), weight: 6.7, gainDb: 0 },
-  { path: join(import.meta.dir, 'assets', 'join_stings', 'hes_going_deep_join.opus'), weight: 4.2, gainDb: 0 },
-  { path: join(import.meta.dir, 'assets', 'join_stings', 'moe_intro_join.opus'), weight: 7.5, gainDb: 0 },
-  { path: join(import.meta.dir, 'assets', 'join_stings', 'chicken_on_a_raft_join.opus'), weight: 4, gainDb: 0 },
-  { path: join(import.meta.dir, 'assets', 'join_stings', 'oh_no_no_no_funk_join.opus'), weight: 5, gainDb: 0 },
-  { path: join(import.meta.dir, 'assets', 'join_stings', 'golden_bangarang_join.opus'), weight: 2.5, gainDb: 0 },
-  { path: join(import.meta.dir, 'assets', 'join_stings', 'trihards_join.opus'), weight: 4, gainDb: 0 },
-  { path: join(import.meta.dir, 'assets', 'join_stings', 'keemstar_join.opus'), weight: 2.5, gainDb: 0 },
-  { path: join(import.meta.dir, 'assets', 'join_stings', 'lobster_jet_join.opus'), weight: 4, gainDb: 0 },
-  { path: join(import.meta.dir, 'assets', 'join_stings', 'turn_red_join.opus'), weight: 4, gainDb: 0 },
-  { path: join(import.meta.dir, 'assets', 'join_stings', 'turbo_turn_red_join.opus'), weight: 1.5, gainDb: 0 },
-  { path: join(import.meta.dir, 'assets', 'join_stings', 'chills_out_of_context_join.opus'), weight: 4.5, gainDb: 0 },
-  { path: join(import.meta.dir, 'assets', 'join_stings', 'neptune_square_join.opus'), weight: 3, gainDb: 0 },
-  { path: join(import.meta.dir, 'assets', 'join_stings', 'capy_hitstick_join.opus'), weight: 3, gainDb: 0 },
-  { path: join(import.meta.dir, 'assets', 'join_stings', 'barts_out_boosted_join.opus'), weight: 3, gainDb: 0 },
-  { path: join(import.meta.dir, 'assets', 'join_stings', 'big_dirty_stinking_bass_join.opus'), weight: 2, gainDb: 0 },
+type JoinSting = { path: string; weight: number; gainDb: number }
+const joinSting = (file: string, weight: number, gainDb = 0): JoinSting =>
+  ({ path: join(import.meta.dir, 'assets', 'join_stings', file), weight, gainDb })
+const JOIN_STINGS: JoinSting[] = [
+  joinSting('bangarang_intro.opus', 9.25, -14),
+  joinSting('alia_intro.opus', 9.25, -14),
+  joinSting('newports_join.opus', 6.5),
+  joinSting('soda_join.opus', 5, -1.9),
+  joinSting('peptide_gooner_join.opus', 2, -4.4),
+  joinSting('poplock_join.opus', 6.5, -3),
+  joinSting('goldscar_join.opus', 0.1),
+  joinSting('homer_barts_out_join.opus', 6.7),
+  joinSting('hes_going_deep_join.opus', 4.2),
+  joinSting('moe_intro_join.opus', 7.5),
+  joinSting('chicken_on_a_raft_join.opus', 4),
+  joinSting('oh_no_no_no_funk_join.opus', 5),
+  joinSting('golden_bangarang_join.opus', 2.5),
+  joinSting('trihards_join.opus', 4),
+  joinSting('keemstar_join.opus', 2.5),
+  joinSting('lobster_jet_join.opus', 4),
+  joinSting('turn_red_join.opus', 4),
+  joinSting('turbo_turn_red_join.opus', 1.5),
+  joinSting('chills_out_of_context_join.opus', 4.5),
+  joinSting('neptune_square_join.opus', 3),
+  joinSting('capy_hitstick_join.opus', 3),
+  joinSting('barts_out_boosted_join.opus', 3),
+  joinSting('big_dirty_stinking_bass_join.opus', 2),
 ]
-function pickJoinSting(): { path: string; weight: number; gainDb: number } {
+function pickJoinSting(): JoinSting {
   const total = JOIN_STINGS.reduce((s, x) => s + x.weight, 0)
   let r = Math.random() * total
   for (const s of JOIN_STINGS) if ((r -= s.weight) < 0) return s
@@ -1422,13 +1382,8 @@ function truncCodePoints(s: string, max: number): string {
 function buildReplyPreview(text: string, attachments: Attachment[]): string {
   const flat = text.replace(/\s+/g, ' ').trim()
   if (flat) {
-    // Slice by code points, not UTF-16 code units: Array.from() keeps each
-    // emoji's surrogate pair (e.g. 💀) as a single element, so the cut can
-    // never land mid-pair. A lone half-surrogate is invalid UTF-16 and crashes
-    // JSON serialisation of the host context — "no low surrogate in string"
-    // → API 400, which bricks the whole request.
-    const cps = Array.from(flat)
-    return cps.length > REPLY_PREVIEW_MAX ? truncCodePoints(flat, REPLY_PREVIEW_MAX - 1) + '…' : flat
+    // Length in code points too, for the same reason as truncCodePoints.
+    return Array.from(flat).length > REPLY_PREVIEW_MAX ? truncCodePoints(flat, REPLY_PREVIEW_MAX - 1) + '…' : flat
   }
   if (attachments.length > 0) {
     const first = safeAttName(attachments[0]!)
