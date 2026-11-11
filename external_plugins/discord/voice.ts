@@ -60,7 +60,7 @@ const TSV_HEADER = [
   'tts_first_audio_ms',
   'error',
 ].join('\t') + '\n'
-const TTS_VOICE_DEFAULT = 'en-GB-RyanNeural'
+export const TTS_VOICE_DEFAULT = 'en-GB-RyanNeural'
 
 type QueueItem =
   | { kind: 'file'; path: string; gainDb?: number }
@@ -94,6 +94,11 @@ type GuildVoiceState = {
 }
 
 const states = new Map<string, GuildVoiceState>()
+
+/** PCM-mute window after each TTS chunk to suppress immediate echo back
+ *  through Deepgram. Belt-and-braces alongside the text-level dedupe
+ *  (isLikelyBotEcho). */
+const ECHO_MUTE_TAIL_MS = 300
 
 // Auto-rejoin flap damping. Every successful joinVoice records joinedAt; a
 // Disconnected-triggered rejoin counts as a flap unless the connection had
@@ -142,6 +147,10 @@ export function setVoiceCallbacks(cb: VoiceCallbacks): void {
     onUnavailable: reason => callbacks.onDeepgramUnavailable?.({ reason }),
     onRecovered: () => callbacks.onDeepgramRecovered?.(),
   })
+}
+
+function errMsg(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
 }
 
 function logVoice(line: string): void {
@@ -193,7 +202,7 @@ export function logUtterance(row: UtteranceLogRow): void {
     ].map(tsvEscape).join('\t') + '\n'
     appendFileSync(path, line)
   } catch (err) {
-    logVoice(`tsv log failed: ${err instanceof Error ? err.message : err}`)
+    logVoice(`tsv log failed: ${errMsg(err)}`)
   }
 }
 
@@ -282,7 +291,7 @@ export async function joinVoice(client: Client, channelId: string): Promise<stri
   } catch (err) {
     connection.destroy()
     releaseLock(guildId)
-    throw new Error(`voice connection never became ready: ${err instanceof Error ? err.message : err}`)
+    throw new Error(`voice connection never became ready: ${errMsg(err)}`)
   }
 
   const flap = rejoinFlap.get(guildId)
@@ -309,11 +318,6 @@ export async function joinVoice(client: Client, channelId: string): Promise<stri
   states.set(guildId, state)
   wireSTT(client, state)
 
-  /** PCM-mute window after each TTS chunk to suppress immediate echo back
-   *  through Deepgram. Belt-and-braces alongside the text-level dedupe in
-   *  server.ts. */
-  const ECHO_MUTE_TAIL_MS = 300
-
   player.on(AudioPlayerStatus.Playing, () => {
     if (state.current?.kind === 'tts') {
       state.ttsActive = true
@@ -322,22 +326,19 @@ export async function joinVoice(client: Client, channelId: string): Promise<stri
       state.pcmMutedUntil = Date.now() + 60_000
     }
   })
-  player.on(AudioPlayerStatus.Idle, () => {
+  // Current item is over (finished or errored): end the TTS mute, play the next.
+  const advance = () => {
     if (state.ttsActive) {
       state.ttsActive = false
       state.pcmMutedUntil = Date.now() + ECHO_MUTE_TAIL_MS
     }
     state.current = null
     void runQueue(state)
-  })
+  }
+  player.on(AudioPlayerStatus.Idle, advance)
   player.on('error', err => {
     logVoice(`player error in guild ${guildId}: ${err.message}`)
-    if (state.ttsActive) {
-      state.ttsActive = false
-      state.pcmMutedUntil = Date.now() + ECHO_MUTE_TAIL_MS
-    }
-    state.current = null
-    void runQueue(state)
+    advance()
   })
   connection.on(VoiceConnectionStatus.Disconnected, async () => {
     try {
@@ -385,7 +386,7 @@ export async function joinVoice(client: Client, channelId: string): Promise<stri
         await joinVoice(client, rejoinChannelId)
         logVoice(`voice auto-rejoin to ${rejoinChannelId} succeeded`)
       } catch (err) {
-        logVoice(`voice auto-rejoin to ${rejoinChannelId} failed: ${err instanceof Error ? err.message : err}`)
+        logVoice(`voice auto-rejoin to ${rejoinChannelId} failed: ${errMsg(err)}`)
       }
     }
   })
@@ -458,7 +459,7 @@ function evaluateEmptyLeave(client: Client, guildId: string): void {
     try {
       leaveVoice(guildId)
     } catch (err) {
-      logVoice(`auto-leave: leaveVoice failed for guild ${guildId}: ${err instanceof Error ? err.message : err}`)
+      logVoice(`auto-leave: leaveVoice failed for guild ${guildId}: ${errMsg(err)}`)
     }
   }, EMPTY_LEAVE_GRACE_MS)
 }
@@ -493,6 +494,14 @@ function killChildren(s: GuildVoiceState): void {
     try { child.kill('SIGKILL') } catch {}
   }
   s.childProcs.clear()
+}
+
+/** Stop whatever is playing right now: kill its children, silence the player,
+ *  clear `current`. Leaves the queue alone — callers decide what survives. */
+function haltPlayback(s: GuildVoiceState): void {
+  killChildren(s)
+  try { s.player.stop(true) } catch {}
+  s.current = null
 }
 
 function killSTTSessions(s: GuildVoiceState): void {
@@ -584,7 +593,7 @@ function wireSTT(client: Client, state: GuildVoiceState): void {
         end: { behavior: EndBehaviorType.AfterSilence, duration: 2000 },
       })
     } catch (err) {
-      logVoice(`stt: receiver.subscribe failed for ${userId}: ${err instanceof Error ? err.message : err}`)
+      logVoice(`stt: receiver.subscribe failed for ${userId}: ${errMsg(err)}`)
       return
     }
     logVoice(`stt: subscribed userId=${userId}`)
@@ -667,13 +676,9 @@ export function enqueueTTS(text: string, voice = TTS_VOICE_DEFAULT, guildId?: st
   // voice_say always wins — clear queue + stop current. Per the plan, music
   // playback is text-side only and never auto-resumes.
   s.queue = s.queue.filter(item => item.kind === 'tts')
-  if (s.current && s.current.kind !== 'tts') {
-    killChildren(s)
-    try { s.player.stop(true) } catch {}
-    // Clear current so the preempted file's in-flight measure/play bails and
-    // runQueue immediately starts the TTS instead of seeing a stale current.
-    s.current = null
-  }
+  // Halting clears current, so the preempted file's in-flight measure/play
+  // bails and runQueue starts the TTS instead of seeing a stale current.
+  if (s.current && s.current.kind !== 'tts') haltPlayback(s)
   s.queue.push({ kind: 'tts', text, voice })
   recordBotUtterance(s, text)
   logUtterance({
@@ -734,9 +739,7 @@ export function isLikelyBotEcho(transcript: string, guildId: string): boolean {
 export function stopPlayback(guildId?: string): void {
   const s = pickGuild(guildId)
   s.queue = []
-  killChildren(s)
-  try { s.player.stop(true) } catch {}
-  s.current = null
+  haltPlayback(s)
 }
 
 export function status(): string {
@@ -766,7 +769,7 @@ async function runQueue(s: GuildVoiceState): Promise<void> {
       await playTTSNow(s, next.text, next.voice)
     }
   } catch (err) {
-    logVoice(`queue item failed: ${err instanceof Error ? err.message : err}`)
+    logVoice(`queue item failed: ${errMsg(err)}`)
     s.current = null
     void runQueue(s)
   }
@@ -839,7 +842,7 @@ function measureLoudness(s: GuildVoiceState, path: string): Promise<number | nul
         '-f', 'null', '-',
       ], { stdio: ['ignore', 'ignore', 'pipe'] })
     } catch (err) {
-      logVoice(`measureLoudness spawn threw for ${path}: ${err instanceof Error ? err.message : err}`)
+      logVoice(`measureLoudness spawn threw for ${path}: ${errMsg(err)}`)
       return resolve(null)
     }
     s.childProcs.add(proc)
@@ -895,10 +898,10 @@ async function playTTSNow(s: GuildVoiceState, text: string, voice: string): Prom
   let stderr = ''
   proc.stderr.on('data', (d: Buffer) => { stderr += d.toString() })
 
-  const failureFired = { v: false }
+  let failed = false
   const fail = (reason: string) => {
-    if (failureFired.v) return
-    failureFired.v = true
+    if (failed) return
+    failed = true
     logVoice(`edge-tts failed in guild ${s.guildId}: ${reason}`)
     callbacks.onTTSFailure?.({ guildId: s.guildId, channelId: s.channelId, reason, text })
   }

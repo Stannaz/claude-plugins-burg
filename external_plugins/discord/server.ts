@@ -41,6 +41,7 @@ import {
   isLikelyBotEcho,
   logUtterance,
   registerVoiceAutoLeave,
+  TTS_VOICE_DEFAULT,
 } from './voice'
 import { dailyCapUsd } from './stt'
 import { setupPresenceTracking } from './presence'
@@ -937,7 +938,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         return { content: [{ type: 'text', text: `queued ${args.path}` }] }
       }
       case 'voice_say': {
-        const voice = (args.voice as string | undefined) ?? 'en-GB-RyanNeural'
+        const voice = (args.voice as string | undefined) ?? TTS_VOICE_DEFAULT
         enqueueTTS(args.text as string, voice, args.guild_id as string | undefined)
         return { content: [{ type: 'text', text: `speaking (${voice})` }] }
       }
